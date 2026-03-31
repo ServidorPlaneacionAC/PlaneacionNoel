@@ -314,9 +314,10 @@ if uploaded_file is not None:
     # ==========================================
     # Dictionary mapping the 3 scenarios with their particular shift and slack rules
     scenarios = {
-        "Demand Driven":   {"shifts": base_shifts, "force_max": False},
-        "Paro Programado": {"shifts": paro_shifts, "force_max": True}, 
-        "Full Capacity":   {"shifts": base_shifts, "force_max": True}
+        "Demand Driven":   {"shifts": base_shifts, "force_max": False, "fill_cap": False},
+        "Paro Programado": {"shifts": paro_shifts, "force_max": True,  "fill_cap": True}, 
+        "Full Capacity":   {"shifts": base_shifts, "force_max": True,  "fill_cap": True},
+        "Paro Óptimo":     {"shifts": base_shifts, "force_max": False, "fill_cap": True} # <-- NUEVO ESCENARIO
     }
 
     # Period map to establish inventory balance with respect to the previous week
@@ -326,7 +327,7 @@ if uploaded_file is not None:
 # ==========================================
 # 3. OPTIMIZATION MODEL
 # ==========================================
-    def generate_scenario_report(name, max_shifts, force_max):
+    def generate_scenario_report(name, max_shifts, force_max, fill_cap): # <-- Agregamos fill_cap aquí
         """
         Defines and solves the mathematical model using Pyomo for a given scenario.
         Calculates financial indicators and returns summary and detail tables.
@@ -349,7 +350,7 @@ if uploaded_file is not None:
                 sum(c_pallet * mdl.E[t] for t in mdl.T)
         model.Obj = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
 
-        # Constraint: Limit of shifts to operate (equal to capacity or less/equal in Demand Driven)
+        # Constraint: Limit of shifts to operate
         def shift_limit_rule(mdl, t): 
             if force_max: return mdl.Y[t] == max_shifts[t]
             else:         return mdl.Y[t] <= max_shifts[t]
@@ -361,25 +362,17 @@ if uploaded_file is not None:
             return req <= mdl.Y[t] * h
         model.Capacity = pyo.Constraint(model.T, rule=capacity_rule)
 
-        # Constraint: Force idle capacity filling if not Demand Driven
+        # Constraint: Force idle capacity filling
         def fill_capacity_rule(mdl, t):
-            if force_max:
-                # 1. Calculate the total continuous time (in hours) needed to produce all units
+            if fill_cap: # <-- Evaluamos con la nueva regla
                 req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M) 
-                
-                # 2. Find the time it takes to produce ONE single unit of the slowest material
                 max_unit_time = max(1 / UPH[m] for m in mdl.M)
-                
-                # 3. Force the required production time to match the total available shift hours.
-                # - We subtract 'max_unit_time' to create a tiny allowance at the end of the week.
-                # - We add 0.001 as an epsilon tolerance to prevent solver crashes from floating-point errors.
                 return req >= (mdl.Y[t] * h) - (max_unit_time + 0.001) 
             else:
-                # Skip this rule entirely for the "Demand Driven" scenario
                 return pyo.Constraint.Skip   
         model.FillCapacity = pyo.Constraint(model.T, rule=fill_capacity_rule)
 
-        # Constraint: Inventory balance equation (Final Inventory = Initial + Production - Demand)
+        # Constraint: Inventory balance equation 
         def inv_balance_rule(mdl, m, t):
             prod = mdl.X[m, t]
             if t == sorted_weeks[0]: return mdl.I[m, t] == I0[m] + prod - Dem[(m, t)]
@@ -395,15 +388,15 @@ if uploaded_file is not None:
             return mdl.P[m, t] >= mdl.I[m, t] / UPP[m]
         model.PalletCeil = pyo.Constraint(model.M, model.T, rule=pallet_ceil_rule)
 
-        # Constraint: Determination of external pallets if they exceed internal CEDI capacity
+        # Constraint: Determination of external pallets 
         def external_wh_rule(mdl, t):
             total_pallets = sum(mdl.P[m, t] for m in mdl.M)
             return mdl.E[t] >= total_pallets - cap_cedi
         model.ExternalWH = pyo.Constraint(model.T, rule=external_wh_rule)
 
-        # Constraint: To force the strict use of the minimum possible number of shifts in Demand Driven
+        # Constraint: Strict use of minimum possible number of shifts (Only for Demand Driven)
         def strict_shifts_rule(mdl, t):
-            if not force_max: 
+            if not force_max and not fill_cap: # <-- Evaluamos con la nueva regla
                 req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M)
                 return req >= ((mdl.Y[t] - 1) * h) + 0.001
             else:
@@ -516,26 +509,29 @@ if uploaded_file is not None:
                 costo_cap_semana += (r * costo_inv_final)
                 cmv_semana       += cmv_mat
                 
-                # Insertion into detail table
-                details_data.append({
-                    "Material": m,
-                    "Periodo \"aaaass\")": t,
-                    "Demanda (Und)": demand,
-                    "Capacidad (Und / hr)": uph,
-                    "Horas necesarias (hr)": horas_necesarias_demanda,
-                    "Tiempo adicional asignado (hr)": horas_adic,
-                    "Producción en tiempo adicional (Und)": prod_adic,
-                    "Producción total (Und)": prod_und,
-                    "Pallets a almacenar": pallets_almacenar,
-                    "Inventario Final (Und)": inv_final,
-                    "Inventario mes anterior (Und)": inv_anterior,
-                    "costo variable unitario ($/Und)": cv_unit,
-                    "costo variable total ($)": costo_var_mat,
-                    "costo unitario total ($/Und)": costo_unitario_total,
-                    "Costo inventario mes anterior ($)": costo_inv_anterior,
-                    "Costo unitario inventario ($/Und)": current_inv_unit_cost,
-                    "Costo inventario ($)": costo_inv_final,
-                    "Costo Mercancía Vendida ($)": cmv_mat
+                # Insertion into executive summary table
+                summary_data.append({
+                    "semana": t,
+                    "Costo fijo total($)": cf_total,
+                    "Total Producido (Und)": prod_und_total,
+                    "Costo fijo unitario ($/Und)": cf_unitario,
+                    "Turnos disponibles": disp_shifts,
+                    "Turnos necesarios": y_val,
+                    "Turnos a apagar (Recomendación)": disp_shifts - y_val, # <-- RECOMENDACIÓN EXPLÍCITA DEL MODELO
+                    "Tiempo holgura (hr)": holgura,
+                    "Pallets a almacenar en tiempo extra": pallets_extra_total,
+                    "Total pallets almacenados": total_pallets_inv,
+                    "Costo Capital ($)": val_inv_semana*r,
+                    "Costo total producción ($)": costo_total_prod,
+                    "Pallets externos": pallets_extra_total,
+                    "Costo Bodega Externa ($)": costo_bodega_externa,
+                    "CMV ($)": cmv_semana,
+                    "Valor inventario": val_inv_semana,
+                    "Variación inventario": var_inv,
+                    "EBITDA (CMV)": cmv_semana,
+                    "Flujo de caja": cmv_semana-var_inv,
+                    "Inventario": inventario_und_total,
+                    "Valor política inventario ($)": valor_politica_inv
                 })
                 
                 # Update cost for the next cycle
@@ -619,14 +615,16 @@ if st.button("Ejecutar Optimización"):
     with st.status("⏳ Iniciando motor de optimización...", expanded=True) as status:
         with pd.ExcelWriter(output_buffer, engine='xlsxwriter') as writer:
             
-            # Iterate through the 3 defined scenarios
+            # Iterate through the 4 defined scenarios
             for name, scenario_config in scenarios.items():
                 st.write(f"⚙️ Optimizando escenario: **{name}**...")
                 
                 shifts_dict = scenario_config["shifts"]
                 force_flag  = scenario_config["force_max"]
+                fill_flag   = scenario_config["fill_cap"] # <-- Extraemos la nueva regla
                 
-                df_summary, df_detail = generate_scenario_report(name, shifts_dict, force_flag)
+                # Pasamos la nueva regla a la función
+                df_summary, df_detail = generate_scenario_report(name, shifts_dict, force_flag, fill_flag)
                 
                 # Handle infeasible scenarios
                 if "Error" in df_summary.columns:
