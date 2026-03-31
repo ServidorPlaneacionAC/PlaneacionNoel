@@ -554,10 +554,11 @@ if uploaded_file is not None:
                 "Costo fijo unitario ($/Und)": cf_unitario,
                 "Turnos disponibles": disp_shifts,
                 "Turnos necesarios": y_val,
+                "Turnos a apagar (Recomendación)": disp_shifts - y_val, # <-- RECOMENDACIÓN EXPLÍCITA DEL MODELO
                 "Tiempo holgura (hr)": holgura,
                 "Pallets a almacenar en tiempo extra": pallets_extra_total,
                 "Total pallets almacenados": total_pallets_inv,
-                "Costo Capital ($)": val_inv_semana*r,
+                "Costo Capital ($)": val_inv_semana * r,
                 "Costo total producción ($)": costo_total_prod,
                 "Pallets externos": pallets_extra_total,
                 "Costo Bodega Externa ($)": costo_bodega_externa,
@@ -565,7 +566,7 @@ if uploaded_file is not None:
                 "Valor inventario": val_inv_semana,
                 "Variación inventario": var_inv,
                 "EBITDA (CMV)": cmv_semana,
-                "Flujo de caja": cmv_semana-var_inv,
+                "Flujo de caja": cmv_semana - var_inv,
                 "Inventario": inventario_und_total,
                 "Valor política inventario ($)": valor_politica_inv
             })
