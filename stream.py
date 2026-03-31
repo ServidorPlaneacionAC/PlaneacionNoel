@@ -415,12 +415,16 @@ if uploaded_file is not None:
         
         results = solver.solve(model, load_solutions=False)
 
+        # Verification of the result's health
         if results.solver.termination_condition != pyo.TerminationCondition.optimal:
             print(f"⚠️ {name} is Infeasible or Time Limit Reached.")
             error_df = pd.DataFrame([{"Error": f"Escenario {name} es inviable o excedió el tiempo límite de {tiempo_limite_segundos}s."}])
-            return error_df, error_df
+            return error_df, error_df, None # <-- Agregamos un tercer valor nulo para los errores
         
+        # Load results back into the Pyomo variable objects
         model.solutions.load_from(results)
+
+        valor_funcion_objetivo = pyo.value(model.Obj)
 
         summary_data = []
         details_data = []
@@ -557,7 +561,7 @@ if uploaded_file is not None:
                 "Valor política inventario ($)": valor_politica_inv
             })
 
-        return pd.DataFrame(summary_data), pd.DataFrame(details_data)
+        return pd.DataFrame(summary_data), pd.DataFrame(details_data), valor_funcion_objetivo
 
 # ==========================================
 # 4. EXECUTION (Execution and Export)
@@ -605,8 +609,10 @@ if st.button("Ejecutar Optimización"):
                 force_flag  = scenario_config["force_max"]
                 fill_flag   = scenario_config["fill_cap"]
                 
-                df_summary, df_detail = generate_scenario_report(name, shifts_dict, force_flag, fill_flag)
+                # Recibimos el tercer valor: obj_val
+                df_summary, df_detail, obj_val = generate_scenario_report(name, shifts_dict, force_flag, fill_flag)
                 
+                # Handle infeasible scenarios
                 if "Error" in df_summary.columns:
                     df_summary.to_excel(writer, sheet_name=f"Error - {name[:20]}", index=False)
                     st.write(f"❌ **{name}**: Matemáticamente inviable o sin solución.")
@@ -626,6 +632,7 @@ if st.button("Ejecutar Optimización"):
                 
                 comparison_data.append({
                     "Escenario":             name,
+                    "Costo Real (Función Obj)": obj_val,  # <-- NUEVA COLUMNA
                     "CMV":                   cmv_total,
                     "Otros egresos":         otros_egresos_total,
                     "Delta valor inventario": delta_valor_inv,
@@ -666,6 +673,7 @@ if st.session_state.get('opt_ejecutada', False):
     with tab_fin:
         st.write("#### Comparación de Impacto Financiero")
         formato_comparacion = {
+            "Costo Real (Función Obj)": "${:,.0f}", # <-- NUEVA COLUMNA CON FORMATO
             "CMV": "${:,.0f}",
             "Otros egresos": "${:,.0f}",
             "Delta valor inventario": "${:,.0f}",
