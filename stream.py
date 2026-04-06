@@ -112,15 +112,7 @@ st.divider()
 # ==========================================
 
 # UI Layout: Step 2 Instructions
-st.markdown(
-    """
-    <div style="background-color: #e0f2fe; padding: 16px; border-radius: 8px; color: #0369a1 ; margin-bottom: 12px">
-        <span style="font-size: 16px; font-weight: bold;">Paso 2:</span> 
-        <span style="font-size: 16px;">👇 Agregar archivo input en formato .xlsx</span>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+st.info("**Paso 2:** 👇 Agregar archivo input en formato .xlsx")
 
 # File uploader widget for the populated Excel file
 uploaded_file = st.file_uploader(
@@ -348,17 +340,26 @@ if uploaded_file is not None:
         model.T = pyo.Set(initialize=sorted_weeks, ordered=True) # Set of Time periods
 
         # Define Decision Variables
-        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers) # Production quantity
-        model.Y = pyo.Var(model.T, domain=pyo.NonNegativeIntegers)          # Number of shifts to operate
-        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers) # Ending inventory quantity
-        model.P = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers) # Required storage pallets 
-        model.E = pyo.Var(model.T, domain=pyo.NonNegativeIntegers)          # External warehouse pallets
+        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) # Production quantity
+        model.Y = pyo.Var(model.T, domain=pyo.NonNegativeReals)          # Number of shifts to operate
+        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) # Ending inventory quantity
+        model.P = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) # Required storage pallets 
+        model.E = pyo.Var(model.T, domain=pyo.NonNegativeReals)          # External warehouse pallets
 
         # Objective Function: Minimize Total Variable Cost + Inventory Capital Cost + External Storage Penalty
         def obj_rule(mdl):
-            return sum(mdl.X[m, t] * CV[m] for m in mdl.M for t in mdl.T) + \
-                sum(r * mdl.I[m, t] * CV[m] for m in mdl.M for t in mdl.T) + \
-                sum(c_pallet * mdl.E[t] for t in mdl.T)
+            # 1. Costo Variable Lineal normal
+            costo_produccion = sum(mdl.X[m, t] * CV[m] for m in mdl.M for t in mdl.T)
+            
+            # 2. COSTO NO LINEAL: Penalización Cuadrática de Inventario (** 2)
+            # Esto simula que saturar la bodega dispara los costos logísticos y de riesgo
+            costo_inventario_nl = sum(r * CV[m] * (mdl.I[m, t] ** 2) for m in mdl.M for t in mdl.T)
+            
+            # 3. Costo de Bodega Externa normal
+            costo_bodega = sum(c_pallet * mdl.E[t] for t in mdl.T)
+            
+            return costo_produccion + costo_inventario_nl + costo_bodega
+            
         model.Obj = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
 
         # Constraint 1: Shift Limits
