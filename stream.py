@@ -424,8 +424,7 @@ if uploaded_file is not None:
                 return pyo.Constraint.Skip
         model.StrictShifts = pyo.Constraint(model.T, rule=strict_shifts_rule)
 
-        # Instantiate the HiGHS solver via the appsi interface
-        solver = pyo.SolverFactory('appsi_highs') 
+        solver = pyo.SolverFactory('ipopt') 
         # Set a strict time limit to prevent infinite loops on complex scenarios
         tiempo_limite_segundos = 180
         solver.options['time_limit'] = tiempo_limite_segundos 
