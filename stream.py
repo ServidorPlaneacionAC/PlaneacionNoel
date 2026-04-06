@@ -128,17 +128,12 @@ if uploaded_file is not None:
     df_prod = pd.read_excel(xls, 'Produccion')
     df_disp = pd.read_excel(xls, 'Disponibilidad')
     df_cap  = pd.read_excel(xls, 'Capacidad')
-    df_par  = pd.read_excel(xls, 'Parametros')
 
     # Initial data cleaning and strict type conversion for primary keys
     df_prod['Semana'] = df_prod['Semana'].fillna(0).astype(int)
     df_disp['Semana'] = df_disp['Semana'].fillna(0).astype(int)
     df_prod['Material'] = df_prod['Material'].astype(str)
     df_cap['Material']  = df_cap['Material'].astype(str)
-
-    # Force numeric columns to float so format="localized" 
-    # applies the thousands separator consistently in the Streamlit UI.
-    df_par['Valor'] = pd.to_numeric(df_par['Valor'], errors='coerce').astype(float)
 
     for col in ['Unidades por hora', 'Unidades por pallet', 'Inventario inicial',
                 'Valor inventario inicial', 'Costo variable unitario', 'Inventario promedio']:
@@ -199,38 +194,12 @@ if uploaded_file is not None:
         )
 
     # ── Tab 4: Global Parameters ───────────────────────────────────────────────
-    with tab4:
-        df_par = st.data_editor(
-            df_par, 
-            num_rows="dynamic", 
-            use_container_width=True, 
-            key="edit_par",
-            column_config={
-                "Valor": st.column_config.NumberColumn(format="localized"),
-            }
-        )
-
+    
     # Re-apply strict data types in case the user inserted anomalous values via the editor
     df_prod['Semana'] = df_prod['Semana'].fillna(0).astype(int)
     df_disp['Semana'] = df_disp['Semana'].fillna(0).astype(int)
     df_prod['Material'] = df_prod['Material'].astype(str)
     df_cap['Material']  = df_cap['Material'].astype(str)
-
-    # Helper function to extract specific global parameters from the parameters table
-    def get_param(name, default):
-        try:
-            val = df_par.loc[df_par['Parametro'] == name, 'Valor'].iloc[0]
-            # Handle comma decimal separators if typed as string
-            if isinstance(val, str): val = float(val.replace(',', '.'))
-            return float(val)
-        except: return default
-
-    # Extract required global parameters, falling back to defaults if missing
-    h = get_param("Horas por turno", 8.0)
-    C_fijo = get_param("Costo fijo", 742373394)
-    r = get_param("Costo Capital", 0.0029)
-    cap_cedi = 5000
-    c_pallet  = 15000
 
     # Construct the mathematical Sets required by the Pyomo model
     M_set = sorted(df_cap['Material'].unique().tolist()) # Set of unique Materials
