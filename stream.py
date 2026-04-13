@@ -319,15 +319,17 @@ if uploaded_file is not None:
             return req <= mdl.Y[t] * h_val
         model.Capacity = pyo.Constraint(model.T, rule=capacity_rule)
 
+        # Constraint 3: Force Idle Capacity Filling
         def fill_capacity_rule(mdl, t):
             if fill_cap:
                 req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M) 
                 max_unit_time = max(1 / UPH[m] for m in mdl.M)
-                return req >= (mdl.Y[t] * h_val) - (max_unit_time + 0.001) 
+                # CAMBIO: Aumentamos la tolerancia a 0.1 horas (6 minutos)
+                return req >= (mdl.Y[t] * h_val) - (max_unit_time + 0.1) 
             else:
                 return pyo.Constraint.Skip   
         model.FillCapacity = pyo.Constraint(model.T, rule=fill_capacity_rule)
-
+        
         def inv_balance_rule(mdl, m, t):
             prod = mdl.X[m, t]
             if t == sorted_weeks[0]: return mdl.I[m, t] == I0[m] + prod - Dem[(m, t)]
@@ -346,10 +348,12 @@ if uploaded_file is not None:
             return mdl.E[t] >= total_pallets - cap_cedi_val
         model.ExternalWH = pyo.Constraint(model.T, rule=external_wh_rule)
 
+        # Constraint 8: Strict Shift Minimization
         def strict_shifts_rule(mdl, t):
             if not force_max and not fill_cap: 
                 req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M)
-                return req >= ((mdl.Y[t] - 1) * h_val) + 0.001
+                # CAMBIO: Aumentamos la tolerancia a 0.1 horas
+                return req >= ((mdl.Y[t] - 1) * h_val) + 0.1
             else:
                 return pyo.Constraint.Skip
         model.StrictShifts = pyo.Constraint(model.T, rule=strict_shifts_rule)
