@@ -290,24 +290,27 @@ if uploaded_file is not None:
         """
         model = pyo.ConcreteModel(name=name)
         
+        # Define Mathematical Sets
         model.M = pyo.Set(initialize=M_set) 
         model.T = pyo.Set(initialize=sorted_weeks, ordered=True)
 
-        # Decision Variables (Relaxed to Continuous Reals for IPOPT compatibility)
-        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) 
-        model.Y = pyo.Var(model.T, domain=pyo.NonNegativeReals)          
-        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) 
-        model.P = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) 
-        model.E = pyo.Var(model.T, domain=pyo.NonNegativeReals)          
+        # 1. Variables de Decisión (Volvemos a Enteros puros)
+        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers) 
+        model.Y = pyo.Var(model.T, domain=pyo.NonNegativeIntegers)          
+        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers) 
+        model.P = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers) 
+        model.E = pyo.Var(model.T, domain=pyo.NonNegativeIntegers)          
 
-        # Objective Function: NLP Quadratic Inventory Penalty
+        # 2. Objective Function: Totalmente Lineal
         def obj_rule(mdl):
             costo_produccion = sum(mdl.X[m, t] * CV[m] for m in mdl.M for t in mdl.T)
-            # Quadratic penalty prevents the solver from accumulating massive redundant stock
-            costo_inventario_nl = sum(r_val * CV[m] * (mdl.I[m, t] ** 2) for m in mdl.M for t in mdl.T)
+            
+            # Costo de inventario lineal (multiplicación normal, sin el ** 2)
+            costo_inventario = sum(r_val * CV[m] * mdl.I[m, t] for m in mdl.M for t in mdl.T)
+            
             costo_bodega = sum(c_pallet_val * mdl.E[t] for t in mdl.T)
             
-            return costo_produccion + costo_inventario_nl + costo_bodega
+            return costo_produccion + costo_inventario + costo_bodega
             
         model.Obj = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
 
@@ -357,11 +360,9 @@ if uploaded_file is not None:
                 return pyo.Constraint.Skip
         model.StrictShifts = pyo.Constraint(model.T, rule=strict_shifts_rule)
 
-        # Solver configuration for NLP
-        solver = pyo.SolverFactory('ipopt') 
+        solver = pyo.SolverFactory('appsi_highs') 
         tiempo_limite_segundos = 180
-        # IPOPT uses 'max_cpu_time' instead of 'time_limit'
-        solver.options['max_cpu_time'] = tiempo_limite_segundos 
+        solver.options['time_limit'] = tiempo_limite_segundos 
         
         results = solver.solve(model, load_solutions=False)
 
