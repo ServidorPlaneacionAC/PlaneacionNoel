@@ -285,9 +285,6 @@ if uploaded_file is not None:
 # ==========================================
     # Note: Added global parameters to the function signature to avoid NameErrors
     def generate_scenario_report(name, max_shifts, force_max, fill_cap, r_val, c_pallet_val, c_fijo_val, h_val, cap_cedi_val):
-        """
-        Constructs and solves a Non-Linear Programming (NLP) model using Pyomo and IPOPT.
-        """
         model = pyo.ConcreteModel(name=name)
         
         # Define Mathematical Sets
@@ -304,10 +301,7 @@ if uploaded_file is not None:
         # 2. Objective Function: Totalmente Lineal
         def obj_rule(mdl):
             costo_produccion = sum(mdl.X[m, t] * CV[m] for m in mdl.M for t in mdl.T)
-            
-            # Costo de inventario lineal (multiplicación normal, sin el ** 2)
             costo_inventario = sum(r_val * CV[m] * mdl.I[m, t] for m in mdl.M for t in mdl.T)
-            
             costo_bodega = sum(c_pallet_val * mdl.E[t] for t in mdl.T)
             
             return costo_produccion + costo_inventario + costo_bodega
