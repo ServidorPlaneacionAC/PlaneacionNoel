@@ -303,8 +303,7 @@ if uploaded_file is not None:
         # Objective Function: NLP Quadratic Inventory Penalty
         def obj_rule(mdl):
             costo_produccion = sum(mdl.X[m, t] * CV[m] for m in mdl.M for t in mdl.T)
-            # Quadratic penalty prevents the solver from accumulating massive redundant stock
-            costo_inventario_nl = sum(r_val * CV[m] * (mdl.I[m, t] ** 2) for m in mdl.M for t in mdl.T)
+            costo_inventario_nl = sum(r_val * CV[m] * (mdl.I[m, t]) for m in mdl.M for t in mdl.T)
             costo_bodega = sum(c_pallet_val * mdl.E[t] for t in mdl.T)
             
             return costo_produccion + costo_inventario_nl + costo_bodega
