@@ -285,26 +285,29 @@ if uploaded_file is not None:
 # ==========================================
     # Note: Added global parameters to the function signature to avoid NameErrors
     def generate_scenario_report(name, max_shifts, force_max, fill_cap, r_val, c_pallet_val, c_fijo_val, h_val, cap_cedi_val):
+        """
+        Constructs and solves a Non-Linear Programming (NLP) model using Pyomo and IPOPT.
+        """
         model = pyo.ConcreteModel(name=name)
         
-        # Define Mathematical Sets
         model.M = pyo.Set(initialize=M_set) 
         model.T = pyo.Set(initialize=sorted_weeks, ordered=True)
 
-        # 1. Variables de Decisión (Volvemos a Enteros puros)
-        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers) 
-        model.Y = pyo.Var(model.T, domain=pyo.NonNegativeIntegers)          
-        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers) 
-        model.P = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers) 
-        model.E = pyo.Var(model.T, domain=pyo.NonNegativeIntegers)          
+        # Decision Variables (Relaxed to Continuous Reals for IPOPT compatibility)
+        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) 
+        model.Y = pyo.Var(model.T, domain=pyo.NonNegativeReals)          
+        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) 
+        model.P = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) 
+        model.E = pyo.Var(model.T, domain=pyo.NonNegativeReals)          
 
-        # 2. Objective Function: Totalmente Lineal
+        # Objective Function: NLP Quadratic Inventory Penalty
         def obj_rule(mdl):
             costo_produccion = sum(mdl.X[m, t] * CV[m] for m in mdl.M for t in mdl.T)
-            costo_inventario = sum(r_val * CV[m] * mdl.I[m, t] for m in mdl.M for t in mdl.T)
+            # Quadratic penalty prevents the solver from accumulating massive redundant stock
+            costo_inventario_nl = sum(r_val * CV[m] * (mdl.I[m, t] ** 2) for m in mdl.M for t in mdl.T)
             costo_bodega = sum(c_pallet_val * mdl.E[t] for t in mdl.T)
             
-            return costo_produccion + costo_inventario + costo_bodega
+            return costo_produccion + costo_inventario_nl + costo_bodega
             
         model.Obj = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
 
@@ -319,17 +322,15 @@ if uploaded_file is not None:
             return req <= mdl.Y[t] * h_val
         model.Capacity = pyo.Constraint(model.T, rule=capacity_rule)
 
-        # Constraint 3: Force Idle Capacity Filling
         def fill_capacity_rule(mdl, t):
             if fill_cap:
                 req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M) 
                 max_unit_time = max(1 / UPH[m] for m in mdl.M)
-                # CAMBIO: Aumentamos la tolerancia a 0.1 horas (6 minutos)
-                return req >= (mdl.Y[t] * h_val) - (max_unit_time + 0.1) 
+                return req >= (mdl.Y[t] * h_val) - (max_unit_time + 0.001) 
             else:
                 return pyo.Constraint.Skip   
         model.FillCapacity = pyo.Constraint(model.T, rule=fill_capacity_rule)
-        
+
         def inv_balance_rule(mdl, m, t):
             prod = mdl.X[m, t]
             if t == sorted_weeks[0]: return mdl.I[m, t] == I0[m] + prod - Dem[(m, t)]
@@ -348,19 +349,19 @@ if uploaded_file is not None:
             return mdl.E[t] >= total_pallets - cap_cedi_val
         model.ExternalWH = pyo.Constraint(model.T, rule=external_wh_rule)
 
-        # Constraint 8: Strict Shift Minimization
         def strict_shifts_rule(mdl, t):
             if not force_max and not fill_cap: 
                 req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M)
-                # CAMBIO: Aumentamos la tolerancia a 0.1 horas
-                return req >= ((mdl.Y[t] - 1) * h_val) + 0.1
+                return req >= ((mdl.Y[t] - 1) * h_val) + 0.001
             else:
                 return pyo.Constraint.Skip
         model.StrictShifts = pyo.Constraint(model.T, rule=strict_shifts_rule)
 
-        solver = pyo.SolverFactory('appsi_highs') 
+        # Solver configuration for NLP
+        solver = pyo.SolverFactory('ipopt') 
         tiempo_limite_segundos = 180
-        solver.options['time_limit'] = tiempo_limite_segundos 
+        # IPOPT uses 'max_cpu_time' instead of 'time_limit'
+        solver.options['max_cpu_time'] = tiempo_limite_segundos 
         
         results = solver.solve(model, load_solutions=False)
 
