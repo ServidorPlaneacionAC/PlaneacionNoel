@@ -3,7 +3,7 @@ import streamlit as st
 import pandas as pd
 import pyomo.environ as pyo
 import io
-import altair
+import altair as alt
 
 # Initial Streamlit page configuration (browser tab title and wide layout)
 st.set_page_config(page_title="Optimización de producción", layout="wide")
@@ -300,20 +300,36 @@ if uploaded_file is not None:
         model.T = pyo.Set(initialize=sorted_weeks, ordered=True)
 
         # Decision Variables (Relaxed to Continuous Reals for IPOPT solver compatibility)
-        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) # Production Units
+        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals, initialize=100) # Production Units
         model.Y = pyo.Var(model.T, domain=pyo.NonNegativeReals)          # Effective Shifts
         model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) # Inventory Units
         model.P = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) # Pallets count
         model.E = pyo.Var(model.T, domain=pyo.NonNegativeReals)          # Excess pallets (External)
 
-        # Objective Function: Minimize Production Cost + Inventory Carrying Cost + External Warehousing
+        # --- UPDATED NON-LINEAR OBJECTIVE FUNCTION ---
         def obj_rule(mdl):
-            costo_produccion = sum(mdl.X[m, t] * CV[m] for m in mdl.M for t in mdl.T)
-            # Quadratic-like penalty logic for inventory carrying costs
-            costo_inventario_nl = sum(r_val * CV[m] * (mdl.I[m, t]) for m in mdl.M for t in mdl.T)
+            # 1. Variable Production Cost
+            costo_produccion_var = sum(mdl.X[m, t] * CV[m] for m in mdl.M for t in mdl.T)
+            
+            # 2. Fixed Cost (Constant across the time horizon)
+            costo_fijo_horizonte = sum(c_fijo_val for t in mdl.T)
+            
+            # 3. Non-Linear Inventory Cost: r * (Variable + Allocated Fixed) * Inventory
+            costo_inventario_nl = 0
+            for t in mdl.T:
+                total_prod_t = sum(mdl.X[m, t] for m in mdl.M)
+                # Fixed Cost Per Unit = Weekly Fixed Cost / Total Weekly Production
+                # Epsilon (0.0001) is added to denominator to prevent division by zero
+                cf_unitario_t = c_fijo_val / (total_prod_t + 0.0001)
+                for m in mdl.M:
+                    # The value of the unit in inventory now includes its shared fixed cost
+                    valor_unitario_total = CV[m] + cf_unitario_t
+                    costo_inventario_nl += r_val * valor_unitario_total * mdl.I[m, t]
+            
+            # 4. External Warehouse Cost
             costo_bodega = sum(c_pallet_val * mdl.E[t] for t in mdl.T)
             
-            return costo_produccion + costo_inventario_nl + costo_bodega
+            return costo_produccion_var + costo_fijo_horizonte + costo_inventario_nl + costo_bodega
             
         model.Obj = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
 
@@ -448,7 +464,7 @@ if uploaded_file is not None:
                 costo_var_mat = prod_und * cv_unit
                 costo_unitario_total = cv_unit + cf_unitario
                 
-                # Valuing inventory using a simplified moving average logic
+                # Valuing inventory using logic consistent with the Objective Function
                 if t == sorted_weeks[0]:
                     costo_inv_anterior = Val_I0[m]
                     costo_unitario_inv_ant = prev_inv_unit_cost[m]
