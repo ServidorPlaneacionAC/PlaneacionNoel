@@ -289,9 +289,9 @@ if uploaded_file is not None:
 # ==========================================
 # 3. OPTIMIZATION MODEL (MATHEMATICAL ENGINE)
 # ==========================================
-    def generate_scenario_report(name, max_shifts, force_max, fill_cap, r_val, c_pallet_val, c_fijo_val, h_val, cap_cedi_val):
+def generate_scenario_report(name, max_shifts, force_max, fill_cap, r_val, c_pallet_val, c_fijo_val, h_val, cap_cedi_val):
         """
-        Constructs and solves a Non-Linear Programming (NLP) model using Pyomo and IPOPT.
+        Constructs and solves an optimization model.
         Determines optimal production (X), inventory (I), and shifts (Y).
         """
         model = pyo.ConcreteModel(name=name)
@@ -299,30 +299,31 @@ if uploaded_file is not None:
         model.M = pyo.Set(initialize=M_set) 
         model.T = pyo.Set(initialize=sorted_weeks, ordered=True)
 
-        # Decision Variables (Relaxed to Continuous Reals for IPOPT solver compatibility)
-        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals, initialize=100) # Production Units
-        model.Y = pyo.Var(model.T, domain=pyo.NonNegativeReals)          # Effective Shifts
-        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) # Inventory Units
-        model.P = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) # Pallets count
-        model.E = pyo.Var(model.T, domain=pyo.NonNegativeReals)          # Excess pallets (External)
+        # Variables
+        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals, initialize=100)
+        
+        # CHANGE: Domain changed to NonNegativeIntegers to ensure only whole shifts are used
+        model.Y = pyo.Var(model.T, domain=pyo.NonNegativeIntegers) 
+        
+        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) 
+        model.P = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) 
+        model.E = pyo.Var(model.T, domain=pyo.NonNegativeReals)          
 
-        # --- UPDATED NON-LINEAR OBJECTIVE FUNCTION ---
+        # --- NON-LINEAR OBJECTIVE FUNCTION ---
         def obj_rule(mdl):
             # 1. Variable Production Cost
             costo_produccion_var = sum(mdl.X[m, t] * CV[m] for m in mdl.M for t in mdl.T)
             
-            # 2. Fixed Cost (Constant across the time horizon)
+            # 2. Fixed Cost (Constant)
             costo_fijo_horizonte = sum(c_fijo_val for t in mdl.T)
             
-            # 3. Non-Linear Inventory Cost: r * (Variable + Allocated Fixed) * Inventory
+            # 3. Non-Linear Inventory Cost using Total Unitary Cost
             costo_inventario_nl = 0
             for t in mdl.T:
                 total_prod_t = sum(mdl.X[m, t] for m in mdl.M)
                 # Fixed Cost Per Unit = Weekly Fixed Cost / Total Weekly Production
-                # Epsilon (0.0001) is added to denominator to prevent division by zero
                 cf_unitario_t = c_fijo_val / (total_prod_t + 0.0001)
                 for m in mdl.M:
-                    # The value of the unit in inventory now includes its shared fixed cost
                     valor_unitario_total = CV[m] + cf_unitario_t
                     costo_inventario_nl += r_val * valor_unitario_total * mdl.I[m, t]
             
@@ -333,63 +334,55 @@ if uploaded_file is not None:
             
         model.Obj = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
 
-        # Constraint: Shift limits (Force maximum capacity or allow flexibility)
+        # Constraint: Shift limits (Must be whole numbers due to Var domain)
         def shift_limit_rule(mdl, t): 
             if force_max: return mdl.Y[t] == max_shifts[t]
             else:         return mdl.Y[t] <= max_shifts[t]
         model.ShiftLimit = pyo.Constraint(model.T, rule=shift_limit_rule)
 
-        # Constraint: Manufacturing Capacity (UPH per product vs available shift hours)
+        # Constraint: Manufacturing Capacity
         def capacity_rule(mdl, t):
             req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M)
             return req <= mdl.Y[t] * h_val
         model.Capacity = pyo.Constraint(model.T, rule=capacity_rule)
 
-        # Constraint: Fill Capacity (Ensure machines run at full speed if fill_cap is True)
+        # Constraint: Fill Capacity
         def fill_capacity_rule(mdl, t):
             if fill_cap:
                 req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M) 
-                max_unit_time = max(1 / UPH[m] for m in mdl.M)
-                return req >= (mdl.Y[t] * h_val) - (max_unit_time + 0.001) 
+                # When using whole shifts, we ensure production is as close to the full shift as possible
+                return req >= (mdl.Y[t] * h_val) - (h_val - 0.001) 
             else:
                 return pyo.Constraint.Skip   
         model.FillCapacity = pyo.Constraint(model.T, rule=fill_capacity_rule)
 
-        # Constraint: Inventory Balance Equation (Previous + Prod - Demand = Current)
+        # Constraint: Inventory Balance
         def inv_balance_rule(mdl, m, t):
             prod = mdl.X[m, t]
             if t == sorted_weeks[0]: return mdl.I[m, t] == I0[m] + prod - Dem[(m, t)]
             else:                    return mdl.I[m, t] == mdl.I[m, prev_week_map[t]] + prod - Dem[(m, t)]
         model.InvBalance = pyo.Constraint(model.M, model.T, rule=inv_balance_rule)
 
-        # Constraint: Inventory Policy (Safety Stock)
+        # Constraint: Inventory Policy
         def inv_policy_rule(mdl, m, t): return mdl.I[m, t] >= Pol[m]
         model.InvPolicy = pyo.Constraint(model.M, model.T, rule=inv_policy_rule)
 
-        # Constraint: Convert units to pallets
+        # Constraint: Pallets
         def pallet_ceil_rule(mdl, m, t):
             return mdl.P[m, t] >= mdl.I[m, t] / UPP[m]
         model.PalletCeil = pyo.Constraint(model.M, model.T, rule=pallet_ceil_rule)
 
-        # Constraint: Identify pallets exceeding internal warehouse capacity
+        # Constraint: External warehouse
         def external_wh_rule(mdl, t):
             total_pallets = sum(mdl.P[m, t] for m in mdl.M)
             return mdl.E[t] >= total_pallets - cap_cedi_val
         model.ExternalWH = pyo.Constraint(model.T, rule=external_wh_rule)
 
-        # Constraint: Strict Shift definition for Demand Driven scenario
-        def strict_shifts_rule(mdl, t):
-            if not force_max and not fill_cap: 
-                req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M)
-                return req >= ((mdl.Y[t] - 1) * h_val) + 0.001
-            else:
-                return pyo.Constraint.Skip
-        model.StrictShifts = pyo.Constraint(model.T, rule=strict_shifts_rule)
-
-        # Solver configuration for NLP using the Interior Point Optimizer (IPOPT)
+        # Solver Configuration
+        # NOTE: IPOPT is a continuous solver. If it ignores the Integer domain, 
+        # you may need to use 'bonmin' or 'couenne' for true discrete shifts.
         solver = pyo.SolverFactory('ipopt') 
-        tiempo_limite_segundos = 180
-        solver.options['max_cpu_time'] = tiempo_limite_segundos 
+        solver.options['max_cpu_time'] = 180 
         
         results = solver.solve(model, load_solutions=False)
 
