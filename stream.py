@@ -3,7 +3,7 @@ import streamlit as st
 import pandas as pd
 import pyomo.environ as pyo
 import io
-import altair as alt
+import alt
 
 # Initial Streamlit page configuration (browser tab title and wide layout)
 st.set_page_config(page_title="Optimización de producción", layout="wide")
@@ -29,7 +29,7 @@ def generar_plantilla():
     """
     buffer = io.BytesIO()
     
-    # Define the expected columns for each Excel sheet
+    # Define the expected columns for each Excel sheet required by the optimization model
     estructuras = {
         'Produccion': ['Material', 'Semana', 'Demanda semanal'],
         'Capacidad': ['Material', 'Unidades por hora', 'Unidades por pallet', 
@@ -38,7 +38,7 @@ def generar_plantilla():
         'Disponibilidad': ['Semana', 'Turnos disponibles']
     }
     
-    # Help texts that will be embedded as comments in the Excel header cells
+    # Help texts that will be embedded as comments in the Excel header cells to guide the user
     instrucciones = {
         'Produccion': {
             'Material': 'Código material (Ej: 1001568).',
@@ -60,11 +60,11 @@ def generar_plantilla():
         }
     }
 
-    # Create the Excel document using xlsxwriter as the engine
+    # Create the Excel document using xlsxwriter as the engine for formatting capabilities
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
         workbook = writer.book
         
-        # Visual style for the header row
+        # Visual style for the header row: Green background with borders
         header_fmt = workbook.add_format({
             'bold': True, 'text_wrap': True, 'valign': 'top',
             'fg_color': '#D7E4BC', 'border': 1
@@ -77,14 +77,14 @@ def generar_plantilla():
             
             worksheet = writer.sheets[nombre_hoja]
             
-            # Apply header format and comments
+            # Apply header format and dynamic comments to each cell
             for idx, col_name in enumerate(columnas):
                 worksheet.write(0, idx, col_name, header_fmt)
                 comentario = instrucciones.get(nombre_hoja, {}).get(col_name, "Diligenciar este dato.")
                 worksheet.write_comment(0, idx, comentario, {'x_scale': 2, 'y_scale': 1.5})
                 worksheet.set_column(idx, idx, 20)
 
-    buffer.seek(0)
+    buffer.seek(0) # Reset buffer pointer to the start for downloading
     return buffer
 
 # UI Layout: Download button for the empty template
@@ -106,7 +106,7 @@ st.divider()
 # UI Layout: Step 2 Instructions (Unified design)
 st.info("**Paso 2:** 👇 Agregar archivo input en formato .xlsx")
 
-# Shrink the file uploader using CSS injection
+# Shrink the file uploader using CSS injection for a cleaner UI
 st.markdown(
     """
     <style>
@@ -126,18 +126,19 @@ with col_uploader:
 
 # Only execute the processing flow if a file has been uploaded
 if uploaded_file is not None:
-    # Read the different tabs of the Excel file
+    # Read the different tabs of the Excel file using Pandas
     xls = pd.ExcelFile(uploaded_file)
     df_prod = pd.read_excel(xls, 'Produccion')
     df_disp = pd.read_excel(xls, 'Disponibilidad')
     df_cap  = pd.read_excel(xls, 'Capacidad')
 
-    # Initial data cleaning and strict type conversion
+    # Initial data cleaning and strict type conversion to avoid math errors
     df_prod['Semana'] = df_prod['Semana'].fillna(0).astype(int)
     df_disp['Semana'] = df_disp['Semana'].fillna(0).astype(int)
     df_prod['Material'] = df_prod['Material'].astype(str)
     df_cap['Material']  = df_cap['Material'].astype(str)
 
+    # Convert operational columns to numeric, coercing errors to NaN and then to float
     for col in ['Unidades por hora', 'Unidades por pallet', 'Inventario inicial',
                 'Valor inventario inicial', 'Costo variable unitario', 'Inventario promedio']:
         df_cap[col] = pd.to_numeric(df_cap[col], errors='coerce').astype(float)
@@ -147,10 +148,11 @@ if uploaded_file is not None:
 
     st.subheader("📝 Vista previa y edición de datos")
     
-    # Create tabs to display and allow editing (Only 3 tabs now)
+    # Create tabs to display and allow editing of uploaded data before optimization
     tab1, tab2, tab3 = st.tabs(["Producción", "Capacidad", "Disponibilidad"])
 
     with tab1:
+        # data_editor allows the user to change demand values directly in the UI
         df_prod = st.data_editor(
             df_prod, num_rows="dynamic", use_container_width=True, key="edit_prod",
             column_config={
@@ -181,7 +183,7 @@ if uploaded_file is not None:
             }
         )
 
-    # Re-apply strict data types after user edits
+    # Re-apply strict data types after user edits to maintain data integrity
     df_prod['Semana'] = df_prod['Semana'].fillna(0).astype(int)
     df_disp['Semana'] = df_disp['Semana'].fillna(0).astype(int)
     df_prod['Material'] = df_prod['Material'].astype(str)
@@ -194,6 +196,7 @@ if uploaded_file is not None:
     st.subheader("⚙️ Parámetros Globales de la Planta")
     st.write("Estos valores aplican para toda la simulación. Modifícalos si es necesario.")
 
+    # Column layout for global plant settings
     col_p1, col_p2, col_p3 = st.columns(3)
     
     with col_p1:
@@ -208,11 +211,11 @@ if uploaded_file is not None:
         r = st.number_input("Costo de Capital (Tasa semanal)", value=0.0029, step=0.0001, format="%.4f")
 
 
-    # Construct the mathematical Sets required by the Pyomo model
+    # Construct the mathematical Sets required by the Pyomo model (Materials and Time Periods)
     M_set = sorted(df_cap['Material'].unique().tolist()) 
     T_set = sorted(df_disp['Semana'].unique().tolist())  
 
-    # Convert capacity dataframe columns into fast-lookup dictionaries
+    # Convert capacity dataframe columns into fast-lookup dictionaries for the model
     UPH    = df_cap.set_index('Material')['Unidades por hora'].to_dict()
     UPP    = df_cap.set_index('Material')['Unidades por pallet'].to_dict()
     CV     = df_cap.set_index('Material')['Costo variable unitario'].to_dict()
@@ -220,13 +223,13 @@ if uploaded_file is not None:
     Pol    = df_cap.set_index('Material')['Inventario promedio'].fillna(0).to_dict()
     Val_I0 = df_cap.set_index('Material')['Valor inventario inicial'].to_dict()
 
-    # Create the demand dictionary
+    # Create the demand dictionary indexed by (Material, Week)
     Dem = {(m, t): 0 for m in M_set for t in T_set}
     for index, row in df_prod.iterrows():
         mat, sem, cant = str(row['Material']), int(row['Semana']), row['Demanda semanal']
         if sem in T_set and mat in M_set: Dem[(mat, sem)] = cant
 
-    # Extract available base shifts
+    # Extract available base shifts per week
     base_shifts = {}
     for index, row in df_disp.iterrows():
         t = int(row['Semana'])
@@ -239,6 +242,7 @@ if uploaded_file is not None:
     st.divider()
     st.subheader("🛑 Configuración de Paros Programados")
     
+    # Pre-populate a table where users specify how many shifts to reduce per week
     df_paros_base = pd.DataFrame({
         "Semana": list(base_shifts.keys()),
         "Turnos disponibles": list(base_shifts.values()),
@@ -253,6 +257,7 @@ if uploaded_file is not None:
         }
     )
 
+    # Validate that downtime doesn't exceed total availability
     errores_paro = False
     paro_shifts = {}
 
@@ -268,8 +273,9 @@ if uploaded_file is not None:
         paro_shifts[semana] = disp - parar
 
     if errores_paro:
-        st.stop() 
+        st.stop() # Halt execution if validation fails
 
+    # Define the configurations for each operational scenario
     scenarios = {
         "Demand Driven":   {"shifts": base_shifts, "force_max": False, "fill_cap": False},
         "Paro Programado": {"shifts": paro_shifts, "force_max": True,  "fill_cap": True}, 
@@ -283,26 +289,27 @@ if uploaded_file is not None:
 # ==========================================
 # 3. OPTIMIZATION MODEL (MATHEMATICAL ENGINE)
 # ==========================================
-    # Note: Added global parameters to the function signature to avoid NameErrors
     def generate_scenario_report(name, max_shifts, force_max, fill_cap, r_val, c_pallet_val, c_fijo_val, h_val, cap_cedi_val):
         """
         Constructs and solves a Non-Linear Programming (NLP) model using Pyomo and IPOPT.
+        Determines optimal production (X), inventory (I), and shifts (Y).
         """
         model = pyo.ConcreteModel(name=name)
         
         model.M = pyo.Set(initialize=M_set) 
         model.T = pyo.Set(initialize=sorted_weeks, ordered=True)
 
-        # Decision Variables (Relaxed to Continuous Reals for IPOPT compatibility)
-        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) 
-        model.Y = pyo.Var(model.T, domain=pyo.NonNegativeReals)          
-        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) 
-        model.P = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) 
-        model.E = pyo.Var(model.T, domain=pyo.NonNegativeReals)          
+        # Decision Variables (Relaxed to Continuous Reals for IPOPT solver compatibility)
+        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) # Production Units
+        model.Y = pyo.Var(model.T, domain=pyo.NonNegativeReals)          # Effective Shifts
+        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) # Inventory Units
+        model.P = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals) # Pallets count
+        model.E = pyo.Var(model.T, domain=pyo.NonNegativeReals)          # Excess pallets (External)
 
-        # Objective Function: NLP Quadratic Inventory Penalty
+        # Objective Function: Minimize Production Cost + Inventory Carrying Cost + External Warehousing
         def obj_rule(mdl):
             costo_produccion = sum(mdl.X[m, t] * CV[m] for m in mdl.M for t in mdl.T)
+            # Quadratic-like penalty logic for inventory carrying costs
             costo_inventario_nl = sum(r_val * CV[m] * (mdl.I[m, t]) for m in mdl.M for t in mdl.T)
             costo_bodega = sum(c_pallet_val * mdl.E[t] for t in mdl.T)
             
@@ -310,17 +317,19 @@ if uploaded_file is not None:
             
         model.Obj = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
 
-        # Constraints (Using the passed parameter h_val instead of global h)
+        # Constraint: Shift limits (Force maximum capacity or allow flexibility)
         def shift_limit_rule(mdl, t): 
             if force_max: return mdl.Y[t] == max_shifts[t]
             else:         return mdl.Y[t] <= max_shifts[t]
         model.ShiftLimit = pyo.Constraint(model.T, rule=shift_limit_rule)
 
+        # Constraint: Manufacturing Capacity (UPH per product vs available shift hours)
         def capacity_rule(mdl, t):
             req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M)
             return req <= mdl.Y[t] * h_val
         model.Capacity = pyo.Constraint(model.T, rule=capacity_rule)
 
+        # Constraint: Fill Capacity (Ensure machines run at full speed if fill_cap is True)
         def fill_capacity_rule(mdl, t):
             if fill_cap:
                 req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M) 
@@ -330,24 +339,29 @@ if uploaded_file is not None:
                 return pyo.Constraint.Skip   
         model.FillCapacity = pyo.Constraint(model.T, rule=fill_capacity_rule)
 
+        # Constraint: Inventory Balance Equation (Previous + Prod - Demand = Current)
         def inv_balance_rule(mdl, m, t):
             prod = mdl.X[m, t]
             if t == sorted_weeks[0]: return mdl.I[m, t] == I0[m] + prod - Dem[(m, t)]
             else:                    return mdl.I[m, t] == mdl.I[m, prev_week_map[t]] + prod - Dem[(m, t)]
         model.InvBalance = pyo.Constraint(model.M, model.T, rule=inv_balance_rule)
 
+        # Constraint: Inventory Policy (Safety Stock)
         def inv_policy_rule(mdl, m, t): return mdl.I[m, t] >= Pol[m]
         model.InvPolicy = pyo.Constraint(model.M, model.T, rule=inv_policy_rule)
 
+        # Constraint: Convert units to pallets
         def pallet_ceil_rule(mdl, m, t):
             return mdl.P[m, t] >= mdl.I[m, t] / UPP[m]
         model.PalletCeil = pyo.Constraint(model.M, model.T, rule=pallet_ceil_rule)
 
+        # Constraint: Identify pallets exceeding internal warehouse capacity
         def external_wh_rule(mdl, t):
             total_pallets = sum(mdl.P[m, t] for m in mdl.M)
             return mdl.E[t] >= total_pallets - cap_cedi_val
         model.ExternalWH = pyo.Constraint(model.T, rule=external_wh_rule)
 
+        # Constraint: Strict Shift definition for Demand Driven scenario
         def strict_shifts_rule(mdl, t):
             if not force_max and not fill_cap: 
                 req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M)
@@ -356,29 +370,30 @@ if uploaded_file is not None:
                 return pyo.Constraint.Skip
         model.StrictShifts = pyo.Constraint(model.T, rule=strict_shifts_rule)
 
-        # Solver configuration for NLP
+        # Solver configuration for NLP using the Interior Point Optimizer (IPOPT)
         solver = pyo.SolverFactory('ipopt') 
         tiempo_limite_segundos = 180
-        # IPOPT uses 'max_cpu_time' instead of 'time_limit'
         solver.options['max_cpu_time'] = tiempo_limite_segundos 
         
         results = solver.solve(model, load_solutions=False)
 
+        # Check solver termination status
         is_optimal = results.solver.termination_condition == pyo.TerminationCondition.optimal
         is_timeout = results.solver.termination_condition == pyo.TerminationCondition.maxTimeLimit
         
+        # Handle cases where no feasible solution is found
         try:
             model.solutions.load_from(results)
         except:
-            print(f"⚠️ {name} no encontró ninguna solución factible.")
             error_df = pd.DataFrame([{"Error": f"Escenario {name} es matemáticamente inviable."}])
             return error_df, error_df, None, False, False
         
+        # Calculate final results and financial KPIs
         valor_funcion_objetivo = pyo.value(model.Obj)
-
         summary_data = []
         details_data = []
         
+        # Track inventory valuation across periods
         prev_inv_value = sum(Val_I0[m] for m in M_set) 
         prev_inv_units = {m: I0[m] for m in M_set}
         
@@ -388,7 +403,7 @@ if uploaded_file is not None:
             else:         prev_inv_unit_cost[m] = CV[m]
 
         for t in sorted_weeks:
-            # Rounding for visual presentation, since IPOPT generates continuous floats
+            # IPOPT returns continuous floats; round for practical reporting
             y_val = round(pyo.value(model.Y[t]), 2)
             disp_shifts = max_shifts[t]
             prod_und_total = sum(pyo.value(model.X[m, t]) for m in M_set)
@@ -400,6 +415,7 @@ if uploaded_file is not None:
             total_pallets_inv = sum(pyo.value(model.I[m, t]) / UPP[m] for m in M_set)
             inventario_und_total = sum(pyo.value(model.I[m, t]) for m in M_set)
             
+            # Allocation of Fixed Costs per unit produced
             cf_total = c_fijo_val 
             cf_unitario = cf_total / prod_und_total if prod_und_total > 0 else 0
             cv_total = sum(pyo.value(model.X[m, t]) * CV[m] for m in M_set)
@@ -410,6 +426,7 @@ if uploaded_file is not None:
             costo_cap_semana = 0
             cmv_semana = 0
             
+            # Individual material detailed calculation
             for m in M_set:
                 demand = Dem[(m, t)]
                 uph = UPH[m]
@@ -417,15 +434,13 @@ if uploaded_file is not None:
                 upp = UPP[m]
                 
                 prod_und = pyo.value(model.X[m, t])
-                prod_pallets = prod_und / upp if upp > 0 else 0
-                
                 horas_necesarias_demanda = demand / uph
                 horas_totales_mat = prod_und / uph
                 peso_tiempo = (horas_totales_mat / time_req) if time_req > 0 else 0
                 
                 horas_adic = holgura * peso_tiempo
                 prod_adic = horas_adic * uph
-                pallets_almacenar = prod_adic / upp
+                pallets_almacenar = (prod_und / upp) if upp > 0 else 0
                 
                 inv_final = pyo.value(model.I[m, t])
                 inv_anterior = prev_inv_units[m]
@@ -433,6 +448,7 @@ if uploaded_file is not None:
                 costo_var_mat = prod_und * cv_unit
                 costo_unitario_total = cv_unit + cf_unitario
                 
+                # Valuing inventory using a simplified moving average logic
                 if t == sorted_weeks[0]:
                     costo_inv_anterior = Val_I0[m]
                     costo_unitario_inv_ant = prev_inv_unit_cost[m]
@@ -453,6 +469,7 @@ if uploaded_file is not None:
                 costo_cap_semana += (r_val * costo_inv_final)
                 cmv_semana       += cmv_mat
                 
+                # Build the granular detail list
                 details_data.append({
                     "Material": m,
                     "Periodo \"aaaass\")": t,
@@ -477,6 +494,7 @@ if uploaded_file is not None:
                 prev_inv_units[m]     = inv_final
                 prev_inv_unit_cost[m] = current_inv_unit_cost
 
+            # Weekly aggregation
             var_inv = val_inv_semana - prev_inv_value
             prev_inv_value = val_inv_semana 
             
@@ -490,7 +508,7 @@ if uploaded_file is not None:
                 "Total Producido (Und)": prod_und_total,
                 "Costo fijo unitario ($/Und)": cf_unitario,
                 "Turnos disponibles": disp_shifts,
-                "Turnos necesarios": y_val, # Now showing continuous values like 2.35
+                "Turnos necesarios": y_val, 
                 "Turnos a apagar (Recomendación)": disp_shifts - y_val, 
                 "Tiempo holgura (hr)": holgura,
                 "Pallets a almacenar en tiempo extra": pallets_extra_total,
@@ -515,14 +533,19 @@ if uploaded_file is not None:
 # ==========================================
 
 def dar_formato_excel(writer, df, sheet_name):
+    """
+    Applies conditional formatting and numeric masks to the output Excel sheets.
+    """
     df.to_excel(writer, sheet_name=sheet_name, index=False)
     worksheet = writer.sheets[sheet_name]
     workbook = writer.book
     
+    # Define formatting styles
     formato_miles = workbook.add_format({'num_format': '#,##0'})
     formato_moneda = workbook.add_format({'num_format': '"$"#,##0'})
     formato_decimal = workbook.add_format({'num_format': '#,##0.00'})
     
+    # Auto-adjust column width and apply specific masks based on column names
     for idx, col in enumerate(df.columns):
         ancho_maximo = max(df[col].astype(str).map(len).max(), len(col)) + 2
         
@@ -533,7 +556,7 @@ def dar_formato_excel(writer, df, sheet_name):
             worksheet.set_column(idx, idx, ancho_maximo, formato_miles)
         else: worksheet.set_column(idx, idx, ancho_maximo)
 
-# Main trigger
+# Main optimization trigger
 if st.button("Ejecutar Optimización"):
     all_summaries_list = []
     comparison_data = []
@@ -541,6 +564,7 @@ if st.button("Ejecutar Optimización"):
     
     output_buffer = io.BytesIO()
     
+    # Progress status bar for UI
     with st.status("⏳ Iniciando motor de optimización...", expanded=True) as status:
         with pd.ExcelWriter(output_buffer, engine='xlsxwriter') as writer:
             
@@ -551,11 +575,12 @@ if st.button("Ejecutar Optimización"):
                 force_flag  = scenario_config["force_max"]
                 fill_flag   = scenario_config["fill_cap"]
                 
-                # We inject the UI global variables into the mathematical engine here
+                # Injects UI parameters into the model engine
                 df_summary, df_detail, obj_val, is_optimal, is_timeout = generate_scenario_report(
                     name, shifts_dict, force_flag, fill_flag, r, c_pallet, C_fijo, h, cap_cedi
                 )
                 
+                # Catch mathematical errors
                 if "Error" in df_summary.columns:
                     st.error(f"❌ **{name}**: No se pudo calcular. Revisa los datos o aumenta el tiempo.")
                     continue
@@ -563,10 +588,12 @@ if st.button("Ejecutar Optimización"):
                 if is_timeout and not is_optimal:
                     st.warning(f"⚠️ **{name}**: Tiempo límite alcanzado. Solución sub-óptima.")
                 
+                # Compile results for cross-scenario comparison
                 df_summary.insert(0, "Escenario", name)
                 all_summaries_list.append(df_summary)
                 dict_summaries[name] = df_summary 
                 
+                # Calculating total impact (Cash Flow / EBITDA)
                 cmv_total           = df_summary["CMV ($)"].sum()
                 otros_egresos_total = df_summary["Costo Capital ($)"].sum()
                 valor_pol_primero   = df_summary["Valor política inventario ($)"].iloc[0]
@@ -580,15 +607,17 @@ if st.button("Ejecutar Optimización"):
                     "CMV":                   cmv_total,
                     "Otros egresos":         otros_egresos_total,
                     "Delta valor inventario": delta_valor_inv,
-                    "Impacto total FCL":     impacto_fcl
+                    "Impacto total FCL":      impacto_fcl
                 })
 
+                # Export scenario sheets to Excel
                 safe_name = name[:20].replace("/", "-")
                 dar_formato_excel(writer, df_summary, f"Sum - {safe_name}")
                 dar_formato_excel(writer, df_detail, f"Det - {safe_name}")
                 
                 st.write(f"✅ **{name}** calculado exitosamente.")
 
+            # Create global sheets in Excel
             if all_summaries_list:
                 df_consolidado = pd.concat(all_summaries_list, ignore_index=True)
                 dar_formato_excel(writer, df_consolidado, "Consolidado_General")
@@ -598,6 +627,7 @@ if st.button("Ejecutar Optimización"):
         
         status.update(label="🎉 Optimización completada.", state="complete", expanded=False)
         
+        # Persistence of data in session state for UI display
         st.session_state['opt_ejecutada'] = True
         st.session_state['comparison_data'] = comparison_data
         st.session_state['dict_summaries'] = dict_summaries
@@ -624,6 +654,7 @@ if st.session_state.get('opt_ejecutada', False):
         df_comp = pd.DataFrame(st.session_state['comparison_data'])
         st.dataframe(df_comp.style.format(formato_comparacion), use_container_width=True)
         
+        # High-level comparison chart using Altair
         st.write("#### Gráfico: Impacto Total FCL por Escenario")
         
         barras = alt.Chart(df_comp).mark_bar(color='#0369a1').encode(
@@ -640,6 +671,7 @@ if st.session_state.get('opt_ejecutada', False):
     with tab_esc:
         if st.session_state['dict_summaries']:
             st.write("#### Detalle operativo por escenario")
+            # Filter results by selecting specific scenarios
             escenario_seleccionado = st.selectbox("Selecciona el escenario a visualizar:", list(st.session_state['dict_summaries'].keys()))
             df_mostrar = st.session_state['dict_summaries'][escenario_seleccionado]
             
@@ -657,6 +689,7 @@ if st.session_state.get('opt_ejecutada', False):
         else:
             st.warning("No hay escenarios calculados para mostrar.")
             
+    # Allow user to download the generated Excel report
     st.download_button(
         label="📥 Descargar Reporte Final (Excel Completo)",
         data=st.session_state['excel_buffer'],
