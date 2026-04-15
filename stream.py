@@ -334,12 +334,14 @@ def generate_scenario_report(name, max_shifts, force_max, fill_cap, r_val, c_pal
             
         model.Obj = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
 
-        # Constraint: Shift limits (Must be whole numbers due to Var domain)
         def shift_limit_rule(mdl, t): 
-            if force_max: return mdl.Y[t] == max_shifts[t]
-            else:         return mdl.Y[t] <= max_shifts[t]
+            # If force_max is True (Paro Programado or Full Capacity)
+            if force_max: 
+                return mdl.Y[t] == max_shifts[t]  # MUST be equality (==)
+            else:
+                return mdl.Y[t] <= max_shifts[t]  # Allowed to use less (<=)
         model.ShiftLimit = pyo.Constraint(model.T, rule=shift_limit_rule)
-
+        
         # Constraint: Manufacturing Capacity
         def capacity_rule(mdl, t):
             req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M)
