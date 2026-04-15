@@ -11,7 +11,7 @@ st.title("🏭 Simulador programación de plantas")
 
 # Introductory description of the application for the UI
 st.markdown("""
-Esta aplicación simular tres escenarios operativos (Paro Programado, Capacidad Full y Demand Driven) y comparar 
+Esta aplicación simula tres escenarios operativos (Paro Programado, Capacidad Full y Demand Driven) y compara 
 los indicadores financieros.""")
 
 st.info("**Paso 1:** Descargar la plantilla base y llenar con los datos necesarios según las inidicaciones.")
@@ -337,7 +337,7 @@ if uploaded_file is not None:
 # ==========================================
     def generate_scenario_report(name, max_shifts, force_max, fill_cap):
         """
-        Constructs and solves a Mixed Integer Linear Programming (MILP) model using Pyomo 
+        Constructs and solves a Mixed Integer Linear/Non-Linear Programming model using Pyomo 
         for a specific scenario. It calculates financial KPIs and returns dataframes for the UI.
         """
         # Initialize a concrete Pyomo model
@@ -355,10 +355,23 @@ if uploaded_file is not None:
         model.E = pyo.Var(model.T, domain=pyo.NonNegativeIntegers)          # External warehouse pallets
 
         # Objective Function: Minimize Total Variable Cost + Inventory Capital Cost + External Storage Penalty
+        # MODIFICATION: Inventory cost now evaluates total unitary cost (Fixed Cost per Unit + Variable Cost per Unit)
         def obj_rule(mdl):
-            return sum(mdl.X[m, t] * CV[m] for m in mdl.M for t in mdl.T) + \
-                sum(r * mdl.I[m, t] * CV[m] for m in mdl.M for t in mdl.T) + \
-                sum(c_pallet * mdl.E[t] for t in mdl.T)
+            var_cost = sum(mdl.X[m, t] * CV[m] for m in mdl.M for t in mdl.T)
+            
+            # Inventory capital cost accumulation
+            inv_cost = 0
+            for t in mdl.T:
+                prod_total_t = sum(mdl.X[m, t] for m in mdl.M)
+                # 0.001 acts as an epsilon to prevent division by zero in non-linear processing
+                cf_unit_t = C_fijo / (prod_total_t + 0.001)
+                for m in mdl.M:
+                    inv_cost += r * mdl.I[m, t] * (CV[m] + cf_unit_t)
+            
+            ext_cost = sum(c_pallet * mdl.E[t] for t in mdl.T)
+            
+            return var_cost + inv_cost + ext_cost
+            
         model.Obj = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
 
         # Constraint 1: Shift Limits
@@ -424,25 +437,28 @@ if uploaded_file is not None:
                 return pyo.Constraint.Skip
         model.StrictShifts = pyo.Constraint(model.T, rule=strict_shifts_rule)
 
-        # Instantiate the HiGHS solver via the appsi interface
-        solver = pyo.SolverFactory('appsi_highs') 
-        # Set a strict time limit to prevent infinite loops on complex scenarios
+        # Instantiate MindtPy to support MINLP solving via sub-solvers
+        solver = pyo.SolverFactory('mindtpy') 
         tiempo_limite_segundos = 180
-        solver.options['time_limit'] = tiempo_limite_segundos 
         
-        # Invoke the solver
-        results = solver.solve(model, load_solutions=False)
-
-        # Check termination flags to determine if the result is optimal or a timeout
-        is_optimal = results.solver.termination_condition == pyo.TerminationCondition.optimal
-        is_timeout = results.solver.termination_condition == pyo.TerminationCondition.maxTimeLimit
-        
-        # Attempt to load the solution (works if optimal OR if timeout occurred but a feasible solution was found)
+        # Invoke the MINLP solver delegating IPOPT for NLP and appsi_highs for MILP logic
         try:
+            results = solver.solve(
+                model, 
+                mip_solver='appsi_highs', 
+                nlp_solver='ipopt',
+                time_limit=tiempo_limite_segundos,
+                load_solutions=False
+            )
+            
+            # Check termination flags to determine if the result is optimal or a timeout
+            is_optimal = results.solver.termination_condition == pyo.TerminationCondition.optimal
+            is_timeout = results.solver.termination_condition == pyo.TerminationCondition.maxTimeLimit
+            
             model.solutions.load_from(results)
-        except:
+        except Exception as e:
             # If load fails, the model is either mathematically infeasible or timed out before finding any solution
-            print(f"⚠️ {name} no encontró ninguna solución factible.")
+            print(f"⚠️ {name} no encontró ninguna solución factible o generó error: {e}")
             error_df = pd.DataFrame([{"Error": f"Escenario {name} es matemáticamente inviable o no encontró solución en {tiempo_limite_segundos}s."}])
             return error_df, error_df, None, False, False
         
@@ -468,7 +484,7 @@ if uploaded_file is not None:
         # Iterate chronologically through periods to build the reporting tables
         for t in sorted_weeks:
             # Extract high-level shift and production variables from Pyomo
-            y_val = int(pyo.value(model.Y[t]))
+            y_val = int(round(pyo.value(model.Y[t])))
             disp_shifts = max_shifts[t]
             prod_und_total = sum(pyo.value(model.X[m, t]) for m in M_set)
             
@@ -477,7 +493,7 @@ if uploaded_file is not None:
             holgura = (y_val * h) - time_req 
             
             # Extract pallet data
-            pallets_extra_total = int(pyo.value(model.E[t]))
+            pallets_extra_total = int(round(pyo.value(model.E[t])))
             total_pallets_inv = sum(pyo.value(model.I[m, t]) / UPP[m] for m in M_set)
             inventario_und_total = sum(pyo.value(model.I[m, t]) for m in M_set)
             
