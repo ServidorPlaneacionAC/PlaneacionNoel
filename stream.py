@@ -3,7 +3,7 @@ import streamlit as st
 import pandas as pd
 import pyomo.environ as pyo
 import io
-import alt
+import altair
 
 # Initial Streamlit page configuration (browser tab title and wide layout)
 st.set_page_config(page_title="Optimización de producción", layout="wide")
