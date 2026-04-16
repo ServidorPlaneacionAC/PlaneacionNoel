@@ -435,19 +435,24 @@ if uploaded_file is not None:
         tiempo_limite_segundos = 180
         
         try:
+            # Eliminado: load_solutions=False
             results = solver.solve(
                 model, 
                 mip_solver='appsi_highs', 
                 nlp_solver='ipopt',
                 strategy='OA',
-                time_limit=tiempo_limite_segundos,
-                load_solutions=False
+                time_limit=tiempo_limite_segundos
             )
             
             is_optimal = results.solver.termination_condition == pyo.TerminationCondition.optimal
             is_timeout = results.solver.termination_condition == pyo.TerminationCondition.maxTimeLimit
             
-            model.solutions.load_from(results)
+            # mindtpy carga la solución automáticamente, pero se mantiene el try-except por redundancia de seguridad
+            try:
+                model.solutions.load_from(results)
+            except:
+                pass 
+                
         except Exception as e:
             # Captura de errores de convergencia del NLP interno
             error_msg = str(e)
