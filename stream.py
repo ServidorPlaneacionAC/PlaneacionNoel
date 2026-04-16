@@ -11,7 +11,7 @@ st.title("🏭 Simulador programación de plantas")
 
 # Introductory description of the application for the UI
 st.markdown("""
-Esta aplicación simular tres escenarios operativos (Paro Programado, Capacidad Full y Demand Driven) y comparar 
+Esta aplicación simula tres escenarios operativos (Paro Programado, Capacidad Full y Demand Driven) y compara 
 los indicadores financieros.""")
 
 st.info("**Paso 1:** Descargar la plantilla base y llenar con los datos necesarios según las inidicaciones.")
@@ -337,7 +337,7 @@ if uploaded_file is not None:
 # ==========================================
     def generate_scenario_report(name, max_shifts, force_max, fill_cap):
         """
-        Constructs and solves a Mixed Integer Linear Programming (MILP) model using Pyomo 
+        Constructs and solves a Mixed Integer Non-Linear Programming (MINLP) model using Pyomo 
         for a specific scenario. It calculates financial KPIs and returns dataframes for the UI.
         """
         # Initialize a concrete Pyomo model
@@ -347,49 +347,59 @@ if uploaded_file is not None:
         model.M = pyo.Set(initialize=M_set) # Set of Materials
         model.T = pyo.Set(initialize=sorted_weeks, ordered=True) # Set of Time periods
 
-        # Define Decision Variables
-        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers) # Production quantity
-        model.Y = pyo.Var(model.T, domain=pyo.NonNegativeIntegers)          # Number of shifts to operate
-        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers) # Ending inventory quantity
-        model.P = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers) # Required storage pallets 
-        model.E = pyo.Var(model.T, domain=pyo.NonNegativeIntegers)          # External warehouse pallets
+        # Define Decision Variables (Initialized at 1 to prevent unstable gradients in NLP)
+        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers, initialize=1) # Production quantity
+        model.Y = pyo.Var(model.T, domain=pyo.NonNegativeIntegers, initialize=1)          # Number of shifts to operate
+        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers, initialize=1) # Ending inventory quantity
+        model.P = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers, initialize=0) # Required storage pallets 
+        model.E = pyo.Var(model.T, domain=pyo.NonNegativeIntegers, initialize=0)          # External warehouse pallets
+
+        # Variable auxiliar para calcular costo fijo unitario evitando división no lineal inestable
+        model.CF_unit = pyo.Var(model.T, domain=pyo.NonNegativeReals, initialize=0)
+
+        # Restricción bilineal: CF_unit * (Produccion total + 1) = Costo Fijo total
+        # El +1 asegura estabilidad matemática si la producción total es 0
+        def cf_unit_rule(mdl, t):
+            prod_total = sum(mdl.X[m, t] for m in mdl.M)
+            return mdl.CF_unit[t] * (prod_total + 1) == C_fijo
+        model.CF_Unit_Constraint = pyo.Constraint(model.T, rule=cf_unit_rule)
 
         # Objective Function: Minimize Total Variable Cost + Inventory Capital Cost + External Storage Penalty
         def obj_rule(mdl):
-            return sum(mdl.X[m, t] * CV[m] for m in mdl.M for t in mdl.T) + \
-                sum(r * mdl.I[m, t] * CV[m] for m in mdl.M for t in mdl.T) + \
-                sum(c_pallet * mdl.E[t] for t in mdl.T)
+            var_cost = sum(mdl.X[m, t] * CV[m] for m in mdl.M for t in mdl.T)
+            
+            # Inventory cost now uses the robust CF_unit variable calculated above
+            inv_cost = sum(r * mdl.I[m, t] * (CV[m] + mdl.CF_unit[t]) for m in mdl.M for t in mdl.T)
+            
+            ext_cost = sum(c_pallet * mdl.E[t] for t in mdl.T)
+            
+            return var_cost + inv_cost + ext_cost
+            
         model.Obj = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
 
         # Constraint 1: Shift Limits
-        # If force_max is True, we force equality (must use all shifts). Else, inequality (can shut down shifts).
         def shift_limit_rule(mdl, t): 
             if force_max: return mdl.Y[t] == max_shifts[t]
             else:         return mdl.Y[t] <= max_shifts[t]
         model.ShiftLimit = pyo.Constraint(model.T, rule=shift_limit_rule)
 
         # Constraint 2: Production Capacity
-        # Total required hours to produce X cannot exceed the total hours provided by operated shifts Y.
         def capacity_rule(mdl, t):
             req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M)
             return req <= mdl.Y[t] * h
         model.Capacity = pyo.Constraint(model.T, rule=capacity_rule)
 
-        # Constraint 3: Force Idle Capacity Filling (If scenario dictates it)
-        # Forces the solver to pack production into the shift until there is no time left to make a single unit.
+        # Constraint 3: Force Idle Capacity Filling 
         def fill_capacity_rule(mdl, t):
             if fill_cap:
                 req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M) 
-                # Find the slowest material to create a safe time tolerance buffer
                 max_unit_time = max(1 / UPH[m] for m in mdl.M)
-                # 0.001 acts as an epsilon to prevent floating-point crash errors
                 return req >= (mdl.Y[t] * h) - (max_unit_time + 0.001) 
             else:
                 return pyo.Constraint.Skip   
         model.FillCapacity = pyo.Constraint(model.T, rule=fill_capacity_rule)
 
         # Constraint 4: Inventory Balance Equation
-        # Final Inventory = Initial Inventory + Production - Demand
         def inv_balance_rule(mdl, m, t):
             prod = mdl.X[m, t]
             if t == sorted_weeks[0]: return mdl.I[m, t] == I0[m] + prod - Dem[(m, t)]
@@ -397,25 +407,21 @@ if uploaded_file is not None:
         model.InvBalance = pyo.Constraint(model.M, model.T, rule=inv_balance_rule)
 
         # Constraint 5: Safety Stock Policy
-        # Final inventory must always be greater than or equal to the defined minimum policy.
         def inv_policy_rule(mdl, m, t): return mdl.I[m, t] >= Pol[m]
         model.InvPolicy = pyo.Constraint(model.M, model.T, rule=inv_policy_rule)
 
-        # Constraint 6: Pallet Calculation (Simulating a mathematical Ceiling function)
-        # By making P an integer variable, this inequality forces P to round up to the next full pallet.
+        # Constraint 6: Pallet Calculation 
         def pallet_ceil_rule(mdl, m, t):
             return mdl.P[m, t] >= mdl.I[m, t] / UPP[m]
         model.PalletCeil = pyo.Constraint(model.M, model.T, rule=pallet_ceil_rule)
 
-        # Constraint 7: External Warehouse Storage (Simulating a Max(0, X) function)
-        # Forces E to absorb any pallets that exceed the internal CEDI capacity.
+        # Constraint 7: External Warehouse Storage 
         def external_wh_rule(mdl, t):
             total_pallets = sum(mdl.P[m, t] for m in mdl.M)
             return mdl.E[t] >= total_pallets - cap_cedi
         model.ExternalWH = pyo.Constraint(model.T, rule=external_wh_rule)
 
-        # Constraint 8: Strict Shift Minimization (Only for Demand Driven)
-        # Prevents the solver from arbitrarily opening a shift if the production could fit into fewer shifts.
+        # Constraint 8: Strict Shift Minimization 
         def strict_shifts_rule(mdl, t):
             if not force_max and not fill_cap: 
                 req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M)
@@ -424,40 +430,40 @@ if uploaded_file is not None:
                 return pyo.Constraint.Skip
         model.StrictShifts = pyo.Constraint(model.T, rule=strict_shifts_rule)
 
-        # Instantiate the HiGHS solver via the appsi interface
-        solver = pyo.SolverFactory('appsi_highs') 
-        # Set a strict time limit to prevent infinite loops on complex scenarios
+        # Instantiate MindtPy to handle the MINLP
+        solver = pyo.SolverFactory('mindtpy') 
         tiempo_limite_segundos = 180
-        solver.options['time_limit'] = tiempo_limite_segundos 
         
-        # Invoke the solver
-        results = solver.solve(model, load_solutions=False)
-
-        # Check termination flags to determine if the result is optimal or a timeout
-        is_optimal = results.solver.termination_condition == pyo.TerminationCondition.optimal
-        is_timeout = results.solver.termination_condition == pyo.TerminationCondition.maxTimeLimit
-        
-        # Attempt to load the solution (works if optimal OR if timeout occurred but a feasible solution was found)
         try:
+            results = solver.solve(
+                model, 
+                mip_solver='appsi_highs', 
+                nlp_solver='ipopt',
+                strategy='OA',
+                time_limit=tiempo_limite_segundos,
+                load_solutions=False
+            )
+            
+            is_optimal = results.solver.termination_condition == pyo.TerminationCondition.optimal
+            is_timeout = results.solver.termination_condition == pyo.TerminationCondition.maxTimeLimit
+            
             model.solutions.load_from(results)
-        except:
-            # If load fails, the model is either mathematically infeasible or timed out before finding any solution
-            print(f"⚠️ {name} no encontró ninguna solución factible.")
-            error_df = pd.DataFrame([{"Error": f"Escenario {name} es matemáticamente inviable o no encontró solución en {tiempo_limite_segundos}s."}])
+        except Exception as e:
+            # Captura de errores de convergencia del NLP interno
+            error_msg = str(e)
+            print(f"⚠️ {name} generó error en el solver: {error_msg}")
+            error_df = pd.DataFrame([{"Error": f"Fallo interno en Escenario {name}: {error_msg}"}])
             return error_df, error_df, None, False, False
         
-        # Extract the pure mathematical Objective Function value
         valor_funcion_objetivo = pyo.value(model.Obj)
 
         # --- Data Extraction and Financial Accounting Logic ---
         summary_data = []
         details_data = []
         
-        # Track previous inventory values to calculate the Delta (Cash Flow impact)
         prev_inv_value = sum(Val_I0[m] for m in M_set) 
         prev_inv_units = {m: I0[m] for m in M_set}
         
-        # Track the Weighted Average Unit Cost for inventory valuation
         prev_inv_unit_cost = {}
         for m in M_set:
             if I0[m] > 0:
@@ -465,35 +471,28 @@ if uploaded_file is not None:
             else:
                 prev_inv_unit_cost[m] = CV[m]
 
-        # Iterate chronologically through periods to build the reporting tables
         for t in sorted_weeks:
-            # Extract high-level shift and production variables from Pyomo
-            y_val = int(pyo.value(model.Y[t]))
+            y_val = int(round(pyo.value(model.Y[t])))
             disp_shifts = max_shifts[t]
             prod_und_total = sum(pyo.value(model.X[m, t]) for m in M_set)
             
-            # Calculate Slack (idle time)
             time_req = sum(pyo.value(model.X[m, t]) / UPH[m] for m in M_set)
             holgura = (y_val * h) - time_req 
             
-            # Extract pallet data
-            pallets_extra_total = int(pyo.value(model.E[t]))
+            pallets_extra_total = int(round(pyo.value(model.E[t])))
             total_pallets_inv = sum(pyo.value(model.I[m, t]) / UPP[m] for m in M_set)
             inventario_und_total = sum(pyo.value(model.I[m, t]) for m in M_set)
             
-            # Calculate Total Production Costs (Fixed + Variable)
             cf_total = C_fijo 
             cf_unitario = cf_total / prod_und_total if prod_und_total > 0 else 0
             cv_total = sum(pyo.value(model.X[m, t]) * CV[m] for m in M_set)
             costo_total_prod = cv_total + cf_total
             costo_bodega_externa = pallets_extra_total * c_pallet
             
-            # Initialize weekly financial accumulators
             val_inv_semana = 0
             costo_cap_semana = 0
             cmv_semana = 0
             
-            # Iterate through each specific material to build the Details Table
             for m in M_set:
                 demand = Dem[(m, t)]
                 uph = UPH[m]
@@ -503,12 +502,10 @@ if uploaded_file is not None:
                 prod_und = pyo.value(model.X[m, t])
                 prod_pallets = prod_und / upp if upp > 0 else 0
                 
-                # Analyze time allocation
                 horas_necesarias_demanda = demand / uph
                 horas_totales_mat = prod_und / uph
                 peso_tiempo = (horas_totales_mat / time_req) if time_req > 0 else 0
                 
-                # Distribute slack proportionally to estimate extra units/pallets produced
                 horas_adic = holgura * peso_tiempo
                 prod_adic = horas_adic * uph
                 pallets_almacenar = prod_adic / upp
@@ -519,7 +516,6 @@ if uploaded_file is not None:
                 costo_var_mat = prod_und * cv_unit
                 costo_unitario_total = cv_unit + cf_unitario
                 
-                # Apply Continuous Weighted Average accounting rules for Inventory
                 if t == sorted_weeks[0]:
                     costo_inv_anterior = Val_I0[m]
                     costo_unitario_inv_ant = prev_inv_unit_cost[m]
@@ -536,12 +532,10 @@ if uploaded_file is not None:
                 costo_inv_final = inv_final * current_inv_unit_cost
                 cmv_mat = demand * current_inv_unit_cost
                 
-                # Add to weekly accumulators
                 val_inv_semana   += costo_inv_final
                 costo_cap_semana += (r * costo_inv_final)
                 cmv_semana       += cmv_mat
                 
-                # Append row to detailed output array
                 details_data.append({
                     "Material": m,
                     "Periodo \"aaaass\")": t,
@@ -563,11 +557,9 @@ if uploaded_file is not None:
                     "Costo Mercancía Vendida ($)": cmv_mat
                 })
                 
-                # Update loop variables for the next period
                 prev_inv_units[m]     = inv_final
                 prev_inv_unit_cost[m] = current_inv_unit_cost
 
-            # Financial calculations for the Global Summary table
             var_inv = val_inv_semana - prev_inv_value
             prev_inv_value = val_inv_semana 
             
@@ -575,7 +567,6 @@ if uploaded_file is not None:
             costo_promedio_global = (val_inv_semana / inventario_und_total) if inventario_und_total > 0 else 0
             valor_politica_inv = total_pol_und * costo_promedio_global
 
-            # Append row to the executive summary array
             summary_data.append({
                 "semana": t,
                 "Costo fijo total($)": cf_total,
@@ -583,7 +574,7 @@ if uploaded_file is not None:
                 "Costo fijo unitario ($/Und)": cf_unitario,
                 "Turnos disponibles": disp_shifts,
                 "Turnos necesarios": y_val,
-                "Turnos a apagar (Recomendación)": disp_shifts - y_val, # Explicit algorithm recommendation
+                "Turnos a apagar (Recomendación)": disp_shifts - y_val,
                 "Tiempo holgura (hr)": holgura,
                 "Pallets a almacenar en tiempo extra": pallets_extra_total,
                 "Total pallets almacenados": total_pallets_inv,
@@ -595,12 +586,11 @@ if uploaded_file is not None:
                 "Valor inventario": val_inv_semana,
                 "Variación inventario": var_inv,
                 "EBITDA (CMV)": cmv_semana,
-                "Flujo de caja": cmv_semana - var_inv, # Approximation of Cash Flow impact
+                "Flujo de caja": cmv_semana - var_inv,
                 "Inventario": inventario_und_total,
                 "Valor política inventario ($)": valor_politica_inv
             })
 
-        # Return the generated tables alongside the solver state flags
         return pd.DataFrame(summary_data), pd.DataFrame(details_data), valor_funcion_objetivo, is_optimal, is_timeout
 
 # ==========================================
@@ -616,14 +606,11 @@ def dar_formato_excel(writer, df, sheet_name):
     worksheet = writer.sheets[sheet_name]
     workbook = writer.book
     
-    # Declare possible Excel number formats
     formato_miles = workbook.add_format({'num_format': '#,##0'})
     formato_moneda = workbook.add_format({'num_format': '"$"#,##0'})
     formato_decimal = workbook.add_format({'num_format': '#,##0.00'})
     
-    # Iterate through columns and apply formatting based on column name and data type
     for idx, col in enumerate(df.columns):
-        # Calculate dynamic column width
         ancho_maximo = max(df[col].astype(str).map(len).max(), len(col)) + 2
         
         if "$" in col:
@@ -635,45 +622,37 @@ def dar_formato_excel(writer, df, sheet_name):
         else:
             worksheet.set_column(idx, idx, ancho_maximo)
 
-# Main trigger button for the optimization pipeline
 if st.button("Ejecutar Optimización"):
     all_summaries_list = []
     comparison_data = []
-    dict_summaries = {} # Dictionary to store output dataframes for the interactive UI
+    dict_summaries = {} 
     
     output_buffer = io.BytesIO()
     
-    # Interactive expandable block to show progress visually in Streamlit
     with st.status("⏳ Iniciando motor de optimización...", expanded=True) as status:
         with pd.ExcelWriter(output_buffer, engine='xlsxwriter') as writer:
             
-            # Iterate through all 4 configured scenarios
             for name, scenario_config in scenarios.items():
                 st.write(f"⚙️ Optimizando escenario: **{name}**...")
                 
-                # Extract rules for the current scenario
                 shifts_dict = scenario_config["shifts"]
                 force_flag  = scenario_config["force_max"]
                 fill_flag   = scenario_config["fill_cap"]
                 
-                # Execute solver and catch returns
                 df_summary, df_detail, obj_val, is_optimal, is_timeout = generate_scenario_report(name, shifts_dict, force_flag, fill_flag)
                 
-                # Case 1: Critical Error (Infeasible or timeout without finding any feasible solution)
                 if "Error" in df_summary.columns:
-                    st.error(f"❌ **{name}**: No se pudo calcular. Revisa los datos de entrada o aumenta el tiempo límite.")
+                    mensaje_error = df_summary["Error"].iloc[0]
+                    st.error(f"❌ **{name}**: {mensaje_error}")
                     continue
                 
-                # Case 2: Solver found a feasible solution but hit the time limit before confirming it is the absolute optimal
                 if is_timeout and not is_optimal:
                     st.warning(f"⚠️ **{name}**: Se alcanzó el tiempo límite de 180s. Los resultados mostrados representan la mejor configuración encontrada, pero podrían no ser el óptimo matemático absoluto.")
                 
-                # Package successful information into lists and dicts
                 df_summary.insert(0, "Escenario", name)
                 all_summaries_list.append(df_summary)
                 dict_summaries[name] = df_summary 
                 
-                # Perform global aggregation calculations for the final Executive Comparison table
                 cmv_total           = df_summary["CMV ($)"].sum()
                 otros_egresos_total = df_summary["Costo Capital ($)"].sum()
                 valor_pol_primero   = df_summary["Valor política inventario ($)"].iloc[0]
@@ -682,24 +661,21 @@ if st.button("Ejecutar Optimización"):
                 
                 impacto_fcl         = cmv_total + otros_egresos_total + delta_valor_inv
                 
-                # Append row to the comparison dataset
                 comparison_data.append({
                     "Escenario":             name,
-                    "Costo Real (Función Obj)": obj_val, # Exposes what the algorithm actually minimized
+                    "Costo Real (Función Obj)": obj_val, 
                     "CMV":                   cmv_total,
                     "Otros egresos":         otros_egresos_total,
                     "Delta valor inventario": delta_valor_inv,
                     "Impacto total FCL":     impacto_fcl
                 })
 
-                # Write individual scenario tabs to the Excel buffer with formatting
                 safe_name = name[:20].replace("/", "-")
                 dar_formato_excel(writer, df_summary, f"Sum - {safe_name}")
                 dar_formato_excel(writer, df_detail, f"Det - {safe_name}")
                 
                 st.write(f"✅ **{name}** calculado exitosamente.")
 
-            # Assembly of the final consolidated tabs in the Excel file
             if all_summaries_list:
                 df_consolidado = pd.concat(all_summaries_list, ignore_index=True)
                 dar_formato_excel(writer, df_consolidado, "Consolidado_General")
@@ -707,11 +683,8 @@ if st.button("Ejecutar Optimización"):
                 df_comparacion = pd.DataFrame(comparison_data)
                 dar_formato_excel(writer, df_comparacion, "Comparacion_Escenarios")
         
-        # Update UI status to completed and collapse the block
         status.update(label="🎉 Optimización completada en todos los escenarios.", state="complete", expanded=False)
         
-        # SAVE RESULTS IN SESSION CACHE 
-        # Crucial to prevent data loss when the user interacts with the generated dropdowns below
         st.session_state['opt_ejecutada'] = True
         st.session_state['comparison_data'] = comparison_data
         st.session_state['dict_summaries'] = dict_summaries
@@ -720,19 +693,15 @@ if st.button("Ejecutar Optimización"):
 # ==========================================
 # 5. UI RESULT VISUALIZATION
 # ==========================================
-# This section is rendered only if the 'opt_ejecutada' flag exists in the active session memory
 if st.session_state.get('opt_ejecutada', False):
     st.divider()
     st.subheader("📊 Resultados de la Optimización")
     
-    # Create main layout tabs for the outputs
     tab_fin, tab_esc = st.tabs(["💰 Reporte Financiero", "📋 Consolidado por Escenario"])
     
-    # ── Tab 1: Comparative Executive Summary ───────────────────────────────────
     with tab_fin:
         st.write("#### Comparación de Impacto Financiero")
         
-        # Format mapping to present numbers as currency in the dataframe
         formato_comparacion = {
             "Costo Real (Función Obj)": "${:,.0f}",
             "CMV": "${:,.0f}",
@@ -741,51 +710,40 @@ if st.session_state.get('opt_ejecutada', False):
             "Impacto total FCL": "${:,.0f}"
         }
         
-        # Convert the cached comparison_data list to a Pandas DataFrame
         df_comp = pd.DataFrame(st.session_state['comparison_data'])
         
-        # Render table in UI
         st.dataframe(
             df_comp.style.format(formato_comparacion), 
             use_container_width=True
         )
         
-        # --- Altair Bar Chart implementation for FCL visualization ---
         st.write("#### Gráfico: Impacto Total FCL por Escenario")
         
-        # 1. Define the bars (Increase font sizes for readability)
         barras = alt.Chart(df_comp).mark_bar(color='#0369a1').encode(
             x=alt.X('Escenario:N', title='', axis=alt.Axis(labelAngle=0, labelFontSize=16)),
             y=alt.Y('Impacto total FCL:Q', title='Impacto FCL ($)', axis=alt.Axis(format='$,.0f', labelFontSize=14, titleFontSize=16))
         )
         
-        # 2. Define the numerical text labels sitting on top of the bars
         etiquetas = barras.mark_text(
             align='center',
             baseline='bottom',
-            dy=-10, # Nudge the text slightly upwards
-            fontSize=20, # Large text size to match user preference
+            dy=-10, 
+            fontSize=20, 
             fontWeight='bold'
         ).encode(
-            # Apply D3 currency formatting directly to the text marks
             text=alt.Text('Impacto total FCL:Q', format='$,.0f')
         )
         
-        # 3. Render both visual layers stacked together
         st.altair_chart(barras + etiquetas, use_container_width=True)
         
-    # ── Tab 2: Detailed Scenario Drill-down ────────────────────────────────────
     with tab_esc:
         if st.session_state['dict_summaries']:
             st.write("#### Detalle operativo por escenario")
             
-            # Interactive dropdown selector pointing to cached data
             escenario_seleccionado = st.selectbox("Selecciona el escenario a visualizar:", list(st.session_state['dict_summaries'].keys()))
             
-            # Fetch the selected dataframe
             df_mostrar = st.session_state['dict_summaries'][escenario_seleccionado]
             
-            # Format mapping for the detailed operational numbers
             formato_resumen = {
                 "Costo fijo total($)": "${:,.0f}",
                 "Costo fijo unitario ($/Und)": "${:,.0f}",
@@ -803,12 +761,10 @@ if st.session_state.get('opt_ejecutada', False):
                 "Inventario": "{:,.0f}"
             }
             
-            # Render table in UI
             st.dataframe(df_mostrar.style.format(formato_resumen), use_container_width=True)
         else:
             st.warning("No hay escenarios calculados para mostrar.")
             
-    # Global download button fetching the full Excel binary from the session cache
     st.download_button(
         label="📥 Descargar Reporte Final (Excel Completo)",
         data=st.session_state['excel_buffer'],
