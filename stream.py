@@ -337,59 +337,54 @@ if uploaded_file is not None:
 # ==========================================
     def generate_scenario_report(name, max_shifts, force_max, fill_cap):
         """
-        Constructs and solves a Mixed Integer Non-Linear Programming (MINLP) model using Pyomo 
-        for a specific scenario. It calculates financial KPIs and returns dataframes for the UI.
+        Constructs and solves a MINLP model using Pyomo. 
+        Includes strict minimum production and capacity tolerance to allocate fixed costs to the cheapest material.
         """
-        # Initialize a concrete Pyomo model
         model = pyo.ConcreteModel(name=name)
         
-        # Define Mathematical Sets
-        model.M = pyo.Set(initialize=M_set) # Set of Materials
-        model.T = pyo.Set(initialize=sorted_weeks, ordered=True) # Set of Time periods
+        model.M = pyo.Set(initialize=M_set) 
+        model.T = pyo.Set(initialize=sorted_weeks, ordered=True) 
 
-        # Define Decision Variables (Initialized at 1 to prevent unstable gradients in NLP)
-        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers, initialize=1) # Production quantity
-        model.Y = pyo.Var(model.T, domain=pyo.NonNegativeIntegers, initialize=1)          # Number of shifts to operate
-        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers, initialize=1) # Ending inventory quantity
-        model.P = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers, initialize=0) # Required storage pallets 
-        model.E = pyo.Var(model.T, domain=pyo.NonNegativeIntegers, initialize=0)          # External warehouse pallets
+        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers, bounds=(0, 5000000), initialize=100) 
+        model.Y = pyo.Var(model.T, domain=pyo.NonNegativeIntegers, bounds=(0, 100), initialize=10)          
+        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers, bounds=(0, 5000000), initialize=100) 
+        model.P = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers, bounds=(0, 100000), initialize=0) 
+        model.E = pyo.Var(model.T, domain=pyo.NonNegativeIntegers, bounds=(0, 100000), initialize=0)          
 
-        # Variable auxiliar para calcular costo fijo unitario evitando división no lineal inestable
-        model.CF_unit = pyo.Var(model.T, domain=pyo.NonNegativeReals, initialize=0)
+        model.CF_unit = pyo.Var(model.T, domain=pyo.NonNegativeReals, bounds=(0, C_fijo), initialize=C_fijo)
 
-        # Restricción bilineal: CF_unit * (Produccion total + 1) = Costo Fijo total
-        # El +1 asegura estabilidad matemática si la producción total es 0
+        # RESTRICCIÓN: Forzar la producción a ser al menos 1 unidad en todos los periodos
+        def min_prod_rule(mdl, t):
+            return sum(mdl.X[m, t] for m in mdl.M) >= 1
+        model.MinProd = pyo.Constraint(model.T, rule=min_prod_rule)
+
+        # RELAJACIÓN CONVEXA: Al forzar la producción >= 1, la multiplicación directa previene inestabilidad
         def cf_unit_rule(mdl, t):
             prod_total = sum(mdl.X[m, t] for m in mdl.M)
-            return mdl.CF_unit[t] * (prod_total + 1) == C_fijo
+            return mdl.CF_unit[t] * prod_total >= C_fijo
         model.CF_Unit_Constraint = pyo.Constraint(model.T, rule=cf_unit_rule)
 
-        # Objective Function: Minimize Total Variable Cost + Inventory Capital Cost + External Storage Penalty
         def obj_rule(mdl):
             var_cost = sum(mdl.X[m, t] * CV[m] for m in mdl.M for t in mdl.T)
-            
-            # Inventory cost now uses the robust CF_unit variable calculated above
             inv_cost = sum(r * mdl.I[m, t] * (CV[m] + mdl.CF_unit[t]) for m in mdl.M for t in mdl.T)
-            
             ext_cost = sum(c_pallet * mdl.E[t] for t in mdl.T)
-            
             return var_cost + inv_cost + ext_cost
             
         model.Obj = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
 
-        # Constraint 1: Shift Limits
         def shift_limit_rule(mdl, t): 
             if force_max: return mdl.Y[t] == max_shifts[t]
             else:         return mdl.Y[t] <= max_shifts[t]
         model.ShiftLimit = pyo.Constraint(model.T, rule=shift_limit_rule)
 
-        # Constraint 2: Production Capacity
         def capacity_rule(mdl, t):
             req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M)
-            return req <= mdl.Y[t] * h
+            # Se otorga tolerancia igual al tiempo requerido para producir 1 unidad del material más lento.
+            # Esto previene infactibilidad matemática cuando los turnos (Y) valen 0 pero se exige X=1
+            max_unit_time = max(1 / UPH[m] for m in mdl.M)
+            return req <= (mdl.Y[t] * h) + max_unit_time
         model.Capacity = pyo.Constraint(model.T, rule=capacity_rule)
 
-        # Constraint 3: Force Idle Capacity Filling 
         def fill_capacity_rule(mdl, t):
             if fill_cap:
                 req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M) 
@@ -399,29 +394,24 @@ if uploaded_file is not None:
                 return pyo.Constraint.Skip   
         model.FillCapacity = pyo.Constraint(model.T, rule=fill_capacity_rule)
 
-        # Constraint 4: Inventory Balance Equation
         def inv_balance_rule(mdl, m, t):
             prod = mdl.X[m, t]
             if t == sorted_weeks[0]: return mdl.I[m, t] == I0[m] + prod - Dem[(m, t)]
             else:                    return mdl.I[m, t] == mdl.I[m, prev_week_map[t]] + prod - Dem[(m, t)]
         model.InvBalance = pyo.Constraint(model.M, model.T, rule=inv_balance_rule)
 
-        # Constraint 5: Safety Stock Policy
         def inv_policy_rule(mdl, m, t): return mdl.I[m, t] >= Pol[m]
         model.InvPolicy = pyo.Constraint(model.M, model.T, rule=inv_policy_rule)
 
-        # Constraint 6: Pallet Calculation 
         def pallet_ceil_rule(mdl, m, t):
             return mdl.P[m, t] >= mdl.I[m, t] / UPP[m]
         model.PalletCeil = pyo.Constraint(model.M, model.T, rule=pallet_ceil_rule)
 
-        # Constraint 7: External Warehouse Storage 
         def external_wh_rule(mdl, t):
             total_pallets = sum(mdl.P[m, t] for m in mdl.M)
             return mdl.E[t] >= total_pallets - cap_cedi
         model.ExternalWH = pyo.Constraint(model.T, rule=external_wh_rule)
 
-        # Constraint 8: Strict Shift Minimization 
         def strict_shifts_rule(mdl, t):
             if not force_max and not fill_cap: 
                 req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M)
@@ -430,12 +420,10 @@ if uploaded_file is not None:
                 return pyo.Constraint.Skip
         model.StrictShifts = pyo.Constraint(model.T, rule=strict_shifts_rule)
 
-        # Instantiate MindtPy to handle the MINLP
         solver = pyo.SolverFactory('mindtpy') 
         tiempo_limite_segundos = 180
         
         try:
-            # Eliminado: load_solutions=False
             results = solver.solve(
                 model, 
                 mip_solver='appsi_highs', 
@@ -447,22 +435,24 @@ if uploaded_file is not None:
             is_optimal = results.solver.termination_condition == pyo.TerminationCondition.optimal
             is_timeout = results.solver.termination_condition == pyo.TerminationCondition.maxTimeLimit
             
-            # mindtpy carga la solución automáticamente, pero se mantiene el try-except por redundancia de seguridad
             try:
                 model.solutions.load_from(results)
             except:
-                pass 
+                pass
                 
+        except ValueError as ve:
+            error_msg = str(ve)
+            print(f"⚠️ {name} devolvió un estado inestable: {error_msg}")
+            error_df = pd.DataFrame([{"Error": f"Inestabilidad matemática en {name}: {error_msg}"}])
+            return error_df, error_df, None, False, False
         except Exception as e:
-            # Captura de errores de convergencia del NLP interno
             error_msg = str(e)
-            print(f"⚠️ {name} generó error en el solver: {error_msg}")
+            print(f"⚠️ {name} falló durante la ejecución: {error_msg}")
             error_df = pd.DataFrame([{"Error": f"Fallo interno en Escenario {name}: {error_msg}"}])
             return error_df, error_df, None, False, False
         
         valor_funcion_objetivo = pyo.value(model.Obj)
 
-        # --- Data Extraction and Financial Accounting Logic ---
         summary_data = []
         details_data = []
         
