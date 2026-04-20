@@ -1,7 +1,6 @@
 streamlit
 pandas
 pyomo
-highspy
-openpyxl
-xlsxwriter
 altair
+xlsxwriter
+gurobipy
