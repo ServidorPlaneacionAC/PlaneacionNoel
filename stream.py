@@ -336,42 +336,50 @@ if uploaded_file is not None:
 # 3. OPTIMIZATION MODEL (MATHEMATICAL ENGINE)
 # ==========================================
     def generate_scenario_report(name, max_shifts, force_max, fill_cap):
-        """
-        Constructs and solves a MINLP model using Pyomo. 
-        Includes strict minimum production and capacity tolerance to allocate fixed costs to the cheapest material.
-        """
         model = pyo.ConcreteModel(name=name)
         
         model.M = pyo.Set(initialize=M_set) 
         model.T = pyo.Set(initialize=sorted_weeks, ordered=True) 
 
-        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers, bounds=(0, 5000000), initialize=100) 
+        # 1. VARIABLES MIXTAS
+        # X (Producción) e I (Inventario) Continuas para evitar el "Efecto Tetris"
+        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals, bounds=(0, 5000000), initialize=100) 
+        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals, bounds=(0, 5000000), initialize=100) 
+        
+        # Turnos y Estibas ESTRICTAMENTE ENTEROS
         model.Y = pyo.Var(model.T, domain=pyo.NonNegativeIntegers, bounds=(0, 100), initialize=10)          
-        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers, bounds=(0, 5000000), initialize=100) 
         model.P = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers, bounds=(0, 100000), initialize=0) 
         model.E = pyo.Var(model.T, domain=pyo.NonNegativeIntegers, bounds=(0, 100000), initialize=0)          
 
+        # Variable auxiliar para el Costo Fijo Unitario Semanal
         model.CF_unit = pyo.Var(model.T, domain=pyo.NonNegativeReals, bounds=(0, C_fijo), initialize=C_fijo)
 
-        # RESTRICCIÓN: Forzar la producción a ser al menos 1 unidad en todos los periodos
+        # 2. RESTRICCIONES DE NO-LINEALIDAD
         def min_prod_rule(mdl, t):
             return sum(mdl.X[m, t] for m in mdl.M) >= 1
         model.MinProd = pyo.Constraint(model.T, rule=min_prod_rule)
 
-        # RELAJACIÓN CONVEXA: Al forzar la producción >= 1, la multiplicación directa previene inestabilidad
+        # Magia Gurobi: Convertimos la división en multiplicación (Bilinealidad)
+        # CF_unitario * Produccion_Total = Costo_Fijo
         def cf_unit_rule(mdl, t):
             prod_total = sum(mdl.X[m, t] for m in mdl.M)
             return mdl.CF_unit[t] * prod_total >= C_fijo
         model.CF_Unit_Constraint = pyo.Constraint(model.T, rule=cf_unit_rule)
 
+        # 3. FUNCIÓN OBJETIVO NO LINEAL (Minimizar Costo Unitario Promedio)
         def obj_rule(mdl):
             var_cost = sum(mdl.X[m, t] * CV[m] for m in mdl.M for t in mdl.T)
+            
+            # Multiplicamos el inventario por el costo total unitario (Variable + Fijo Dinámico)
             inv_cost = sum(r * mdl.I[m, t] * (CV[m] + mdl.CF_unit[t]) for m in mdl.M for t in mdl.T)
+            
             ext_cost = sum(c_pallet * mdl.E[t] for t in mdl.T)
+            
             return var_cost + inv_cost + ext_cost
             
         model.Obj = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
 
+        # --- Restricciones Operativas ---
         def shift_limit_rule(mdl, t): 
             if force_max: return mdl.Y[t] == max_shifts[t]
             else:         return mdl.Y[t] <= max_shifts[t]
@@ -379,8 +387,6 @@ if uploaded_file is not None:
 
         def capacity_rule(mdl, t):
             req = sum(mdl.X[m, t] / UPH[m] for m in mdl.M)
-            # Se otorga tolerancia igual al tiempo requerido para producir 1 unidad del material más lento.
-            # Esto previene infactibilidad matemática cuando los turnos (Y) valen 0 pero se exige X=1
             max_unit_time = max(1 / UPH[m] for m in mdl.M)
             return req <= (mdl.Y[t] * h) + max_unit_time
         model.Capacity = pyo.Constraint(model.T, rule=capacity_rule)
@@ -420,38 +426,38 @@ if uploaded_file is not None:
                 return pyo.Constraint.Skip
         model.StrictShifts = pyo.Constraint(model.T, rule=strict_shifts_rule)
 
-        solver = pyo.SolverFactory('mindtpy') 
-        tiempo_limite_segundos = 180
+        # 4. CONFIGURACIÓN DEL SOLVER (GUROBI NON-CONVEX)
+        
+        # INICIALIZACIÓN DE SEGURIDAD: Evita el NameError pase lo que pase
+        is_optimal = False
+        is_timeout = False
+        valor_funcion_objetivo = 0
+        
+        solver = pyo.SolverFactory('gurobi') 
+        solver.options['TimeLimit'] = 180
+        solver.options['NonConvex'] = 2 # <--- EL SECRETO DE GUROBI PARA DIVISIÓN/BILINEALIDAD
         
         try:
-            results = solver.solve(
-                model, 
-                mip_solver='appsi_highs', 
-                nlp_solver='ipopt',
-                strategy='OA',
-                time_limit=tiempo_limite_segundos
-            )
+            results = solver.solve(model, load_solutions=False)
             
             is_optimal = results.solver.termination_condition == pyo.TerminationCondition.optimal
             is_timeout = results.solver.termination_condition == pyo.TerminationCondition.maxTimeLimit
             
-            try:
+            # Solo intentamos cargar la solución si el solver fue exitoso
+            if is_optimal or is_timeout:
                 model.solutions.load_from(results)
-            except:
-                pass
+                valor_funcion_objetivo = pyo.value(model.Obj)
+            else:
+                error_msg = f"Escenario inviable. Estado de Gurobi: {results.solver.termination_condition}"
+                print(f"⚠️ {error_msg}")
+                error_df = pd.DataFrame([{"Error": error_msg}])
+                return error_df, error_df, None, False, False
                 
-        except ValueError as ve:
-            error_msg = str(ve)
-            print(f"⚠️ {name} devolvió un estado inestable: {error_msg}")
-            error_df = pd.DataFrame([{"Error": f"Inestabilidad matemática en {name}: {error_msg}"}])
-            return error_df, error_df, None, False, False
         except Exception as e:
             error_msg = str(e)
             print(f"⚠️ {name} falló durante la ejecución: {error_msg}")
-            error_df = pd.DataFrame([{"Error": f"Fallo interno en Escenario {name}: {error_msg}"}])
+            error_df = pd.DataFrame([{"Error": f"Fallo interno en Gurobi para {name}: {error_msg}"}])
             return error_df, error_df, None, False, False
-        
-        valor_funcion_objetivo = pyo.value(model.Obj)
 
         summary_data = []
         details_data = []
