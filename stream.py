@@ -249,13 +249,15 @@ if uploaded_file is not None:
 # 3. OPTIMIZATION MODEL (MATHEMATICAL ENGINE)
 # ==========================================
     def generate_scenario_report(name, max_shifts, force_max, fill_cap):
-        # 1. INICIALIZACIÓN DE SEGURIDAD (Evita NameError)
+        # ✅ Initialize ALL variables BEFORE any try/except
         is_optimal = False
         is_timeout = False
         valor_funcion_objetivo = 0
         summary_data = []
         details_data = []
-        
+    
+        model = pyo.ConcreteModel(name=name)
+            
         model = pyo.ConcreteModel(name=name)
         model.M = pyo.Set(initialize=M_set) 
         model.T = pyo.Set(initialize=sorted_weeks, ordered=True) 
