@@ -4,3 +4,4 @@ pyomo
 altair
 xlsxwriter
 gurobipy
+openpyxl
