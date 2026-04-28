@@ -356,7 +356,7 @@ if uploaded_file is not None:
         solver.options['NonConvex'] = 2 # Permite multiplicación bilineal
         
         try:
-            results = solver.solve(model, load_solutions=False)
+            results = solver.solve(model, load_solutions=False, tee=True)
             is_optimal = results.solver.termination_condition == pyo.TerminationCondition.optimal
             is_timeout = results.solver.termination_condition == pyo.TerminationCondition.maxTimeLimit
             
