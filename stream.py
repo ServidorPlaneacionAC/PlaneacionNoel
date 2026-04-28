@@ -7,6 +7,13 @@ import altair as alt
 import math
 import os
 
+try:
+    os.environ["GRB_WLSACCESSID"] = st.secrets["GRB_WLSACCESSID"]
+    os.environ["GRB_WLSSECRET"] = st.secrets["GRB_WLSSECRET"]
+    os.environ["GRB_LICENSEID"] = str(st.secrets["GRB_LICENSEID"])
+except KeyError:
+    pass
+
 # Initial Streamlit page configuration (browser tab title and wide layout)
 st.set_page_config(page_title="Optimización de producción", layout="wide")
 st.title("🏭 Simulador programación de plantas")
@@ -344,11 +351,6 @@ if uploaded_file is not None:
             else:
                 return pyo.Constraint.Skip
         model.StrictShifts = pyo.Constraint(model.T, rule=strict_shifts_rule)
-
-        os.environ["GRB_WLSACCESSID"] = st.secrets["GRB_WLSACCESSID"]
-        os.environ["GRB_WLSSECRET"] = st.secrets["GRB_WLSSECRET"]
-        os.environ["GRB_LICENSEID"] = st.secrets["GRB_LICENSEID"]
-        # --------------------------------------------------
         
         solver = pyo.SolverFactory('gurobi_direct') 
         solver.options['TimeLimit'] = 180
