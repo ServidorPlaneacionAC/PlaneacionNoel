@@ -4,6 +4,7 @@ import pandas as pd
 import pyomo.environ as pyo
 import io
 import altair as alt
+import math
 
 # Initial Streamlit page configuration (browser tab title and wide layout)
 st.set_page_config(page_title="Optimización de producción", layout="wide")
@@ -30,7 +31,6 @@ def generar_plantilla():
                       'Inventario inicial', 'Valor inventario inicial', 
                       'Costo variable unitario', 'Inventario promedio'],
         'Disponibilidad': ['Semana', 'Turnos disponibles'],
-        'Parametros': ['Parametro', 'Valor']
     }
     
     instrucciones = {
@@ -52,10 +52,6 @@ def generar_plantilla():
             'Semana': 'Formato AñoSemana (Ej: 202545).',
             'Turnos disponibles': 'Turnos disponibles teóricos con capacidad full (Ej: 21).'
         },
-        'Parametros': {
-            'Parametro': 'Valores fijos (Ej: "Horas por turno", "Costo fijo", "Costo Capital)".',
-            'Valor': 'Valor numérico (Ej: 8, 750000000, 0.0029).'
-        }
     }
 
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
@@ -110,14 +106,12 @@ if uploaded_file is not None:
     df_prod = pd.read_excel(xls, 'Produccion')
     df_disp = pd.read_excel(xls, 'Disponibilidad')
     df_cap  = pd.read_excel(xls, 'Capacidad')
-    df_par  = pd.read_excel(xls, 'Parametros')
+    # df_par removed — parameters are now widgets
 
     df_prod['Semana'] = df_prod['Semana'].fillna(0).astype(int)
     df_disp['Semana'] = df_disp['Semana'].fillna(0).astype(int)
     df_prod['Material'] = df_prod['Material'].astype(str)
     df_cap['Material']  = df_cap['Material'].astype(str)
-
-    df_par['Valor'] = pd.to_numeric(df_par['Valor'], errors='coerce').astype(float)
 
     for col in ['Unidades por hora', 'Unidades por pallet', 'Inventario inicial',
                 'Valor inventario inicial', 'Costo variable unitario', 'Inventario promedio']:
@@ -127,7 +121,7 @@ if uploaded_file is not None:
     df_disp['Turnos disponibles'] = pd.to_numeric(df_disp['Turnos disponibles'], errors='coerce').astype(float)
 
     st.subheader("📝 Vista previa y edición de datos")
-    tab1, tab2, tab3, tab4 = st.tabs(["Producción", "Capacidad", "Disponibilidad", "Parámetros"])
+    tab1, tab2, tab3 = st.tabs(["Producción", "Capacidad", "Disponibilidad"])
 
     with tab1:
         df_prod = st.data_editor(
@@ -135,7 +129,6 @@ if uploaded_file is not None:
             column_config={"Semana": st.column_config.NumberColumn(format="%d"),
                            "Demanda semanal": st.column_config.NumberColumn(format="localized")}
         )
-
     with tab2:
         df_cap = st.data_editor(
             df_cap, num_rows="dynamic", use_container_width=True, key="edit_cap",
@@ -148,7 +141,6 @@ if uploaded_file is not None:
                 "Inventario promedio": st.column_config.NumberColumn(format="localized"),
             }
         )
-
     with tab3:
         df_disp = st.data_editor(
             df_disp, num_rows="dynamic", use_container_width=True, key="edit_disp",
@@ -156,29 +148,43 @@ if uploaded_file is not None:
                            "Turnos disponibles": st.column_config.NumberColumn(format="localized")}
         )
 
-    with tab4:
-        df_par = st.data_editor(
-            df_par, num_rows="dynamic", use_container_width=True, key="edit_par",
-            column_config={"Valor": st.column_config.NumberColumn(format="localized")}
-        )
-
     df_prod['Semana'] = df_prod['Semana'].fillna(0).astype(int)
     df_disp['Semana'] = df_disp['Semana'].fillna(0).astype(int)
     df_prod['Material'] = df_prod['Material'].astype(str)
     df_cap['Material']  = df_cap['Material'].astype(str)
 
-    def get_param(name, default):
-        try:
-            val = df_par.loc[df_par['Parametro'] == name, 'Valor'].iloc[0]
-            if isinstance(val, str): val = float(val.replace(',', '.'))
-            return float(val)
-        except: return default
+    st.sidebar.header("⚙️ Parámetros del modelo")
 
-    h = get_param("Horas por turno", 8.0)
-    C_fijo = get_param("Costo fijo", 742373394)
-    r = get_param("Costo Capital", 0.0029)
-    cap_cedi = 5000
-    c_pallet  = 15000
+    h = st.sidebar.number_input(
+        "Horas por turno",
+        min_value=0.1, max_value=24.0,
+        value=8.0, step=0.5,
+        help="Duración en horas de cada turno de producción."
+    )
+    C_fijo = st.sidebar.number_input(
+        "Costo fijo ($)",
+        min_value=0,
+        value=742373394, step=100,
+        help="Costo fijo total de la planta por semana."
+    )
+    r = st.sidebar.number_input(
+        "Costo de capital (tasa semanal)",
+        min_value=0.0, max_value=1.0,
+        value=0.0029, step=0.0001, format="%.4f",
+        help="Tasa semanal del costo de capital sobre el inventario."
+    )
+    cap_cedi = st.sidebar.number_input(
+        "Capacidad CEDI (pallets)",
+        min_value=0,
+        value=5000, step=1,
+        help="Capacidad máxima de almacenamiento en CEDI en pallets."
+    )
+    c_pallet = st.sidebar.number_input(
+        "Costo pallet externo ($)",
+        min_value=0,
+        value=15000, step=100,
+        help="Costo por pallet almacenado en bodega externa por semana."
+    )
 
     M_set = sorted(df_cap['Material'].unique().tolist()) 
     T_set = sorted(df_disp['Semana'].unique().tolist())  
@@ -273,6 +279,14 @@ if uploaded_file is not None:
 
         model.CF_unit = pyo.Var(model.T, domain=pyo.NonNegativeReals, bounds=(0, C_fijo), initialize=C_fijo)
 
+        # FUNCIÓN OBJETIVO
+        def obj_rule(mdl):
+            var_cost = sum((mdl.X[m, t] * CV[m]) + C_fijo for m in mdl.M for t in mdl.T)
+            inv_cost = sum(r * mdl.I[m, t] * (CV[m] + mdl.CF_unit[t]) for m in mdl.M for t in mdl.T)
+            ext_cost = sum(c_pallet * mdl.E[t] for t in mdl.T)
+            return var_cost + inv_cost + ext_cost
+        model.Obj = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
+        
         # 3. RESTRICCIONES
         def min_prod_rule(mdl, t):
             return sum(mdl.X[m, t] for m in mdl.M) >= 1
@@ -283,14 +297,6 @@ if uploaded_file is not None:
             prod_total = sum(mdl.X[m, t] for m in mdl.M)
             return mdl.CF_unit[t] * prod_total >= C_fijo
         model.CF_Unit_Constraint = pyo.Constraint(model.T, rule=cf_unit_rule)
-
-        def obj_rule(mdl):
-            var_cost = sum(mdl.X[m, t] * CV[m] for m in mdl.M for t in mdl.T)
-            inv_cost = sum(r * mdl.I[m, t] * (CV[m] + mdl.CF_unit[t]) for m in mdl.M for t in mdl.T)
-            ext_cost = sum(c_pallet * mdl.E[t] for t in mdl.T)
-            return var_cost + inv_cost + ext_cost
-            
-        model.Obj = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
 
         def shift_limit_rule(mdl, t): 
             if force_max: return mdl.Y[t] == max_shifts[t]
@@ -364,8 +370,9 @@ if uploaded_file is not None:
         # 5. CONSTRUCCIÓN DEL REPORTE
         prev_inv_value = sum(Val_I0[m] for m in M_set) 
         prev_inv_units = {m: I0[m] for m in M_set}
-        
+
         prev_inv_unit_cost = {}
+
         for m in M_set:
             if I0[m] > 0:
                 prev_inv_unit_cost[m] = Val_I0[m] / I0[m]
@@ -373,12 +380,14 @@ if uploaded_file is not None:
                 prev_inv_unit_cost[m] = CV[m]
 
         for t in sorted_weeks:
+
             y_val = int(round(pyo.value(model.Y[t])))
             disp_shifts = max_shifts[t]
             prod_und_total = sum(pyo.value(model.X[m, t]) for m in M_set)
             
-            time_req = sum(pyo.value(model.X[m, t]) / UPH[m] for m in M_set)
-            holgura = (y_val * h) - time_req 
+            Weekly_time_req = sum(Dem[(m, t)] / UPH[m] for m in M_set)
+            shifts_for_demand = math.ceil(Weekly_time_req / h)
+            holgura = (shifts_for_demand * h) - Weekly_time_req
             
             pallets_extra_total = int(round(pyo.value(model.E[t])))
             total_pallets_inv = sum(pyo.value(model.I[m, t]) / UPP[m] for m in M_set)
@@ -404,12 +413,12 @@ if uploaded_file is not None:
                 prod_pallets = prod_und / upp if upp > 0 else 0
                 
                 horas_necesarias_demanda = demand / uph
-                horas_totales_mat = prod_und / uph
-                peso_tiempo = (horas_totales_mat / time_req) if time_req > 0 else 0
+                peso_tiempo = (horas_necesarias_demanda / Weekly_time_req) if Weekly_time_req > 0 else 0
                 
                 horas_adic = holgura * peso_tiempo
                 prod_adic = horas_adic * uph
-                pallets_almacenar = prod_adic / upp
+                pallets_almacenar = (prod_adic+prod_und) / upp
+                pallets_tiempo_extra = (prod_adic) / upp
                 
                 inv_final = pyo.value(model.I[m, t])
                 inv_anterior = prev_inv_units[m]
@@ -443,10 +452,11 @@ if uploaded_file is not None:
                     "Demanda (Und)": demand,
                     "Capacidad (Und / hr)": uph,
                     "Horas necesarias (hr)": horas_necesarias_demanda,
-                    "Tiempo adicional asignado (hr)": horas_adic,
-                    "Producción en tiempo adicional (Und)": prod_adic,
                     "Producción total (Und)": prod_und,
                     "Pallets a almacenar": pallets_almacenar,
+                    "Tiempo adicional asignado (hr)": horas_adic,
+                    "Producción en tiempo adicional (Und)": prod_adic,
+                    "Pallets en tiempo extra": pallets_tiempo_extra,
                     "Inventario Final (Und)": inv_final,
                     "Inventario mes anterior (Und)": inv_anterior,
                     "costo variable unitario ($/Und)": cv_unit,
@@ -491,6 +501,7 @@ if uploaded_file is not None:
                 "Inventario": inventario_und_total,
                 "Valor política inventario ($)": valor_politica_inv
             })
+
 
         return pd.DataFrame(summary_data), pd.DataFrame(details_data), valor_funcion_objetivo, is_optimal, is_timeout
 
@@ -607,18 +618,45 @@ if st.session_state.get('opt_ejecutada', False):
         df_comp = pd.DataFrame(st.session_state['comparison_data'])
         st.dataframe(df_comp.style.format(formato_comparacion), use_container_width=True)
         
-        st.write("#### Gráfico: Impacto Total FCL por Escenario")
-        
-        barras = alt.Chart(df_comp).mark_bar(color='#0369a1').encode(
-            x=alt.X('Escenario:N', title='', axis=alt.Axis(labelAngle=0, labelFontSize=16)),
-            y=alt.Y('Impacto total FCL:Q', title='Impacto FCL ($)', axis=alt.Axis(format='$,.0f', labelFontSize=14, titleFontSize=16))
+        st.write("#### Costo Unitario por Semana y Escenario")
+
+        # Build a long-format dataframe from all scenario summaries
+        linechart_rows = []
+        for escenario, df_esc in st.session_state['dict_summaries'].items():
+            for _, row in df_esc.iterrows():
+                linechart_rows.append({
+                    "Escenario": escenario,
+                    "Semana": str(int(row["semana"])),
+                    "Costo Unitario ($/Und)": row["Costo fijo unitario ($/Und)"]
+                })
+        df_line = pd.DataFrame(linechart_rows)
+
+        # Filter widget
+        all_scenarios = df_line["Escenario"].unique().tolist()
+        selected_scenarios = st.multiselect(
+            "Filtrar escenarios:",
+            options=all_scenarios,
+            default=all_scenarios
         )
-        
-        etiquetas = barras.mark_text(
-            align='center', baseline='bottom', dy=-10, fontSize=20, fontWeight='bold'
-        ).encode(text=alt.Text('Impacto total FCL:Q', format='$,.0f'))
-        
-        st.altair_chart(barras + etiquetas, use_container_width=True)
+
+        df_filtered = df_line[df_line["Escenario"].isin(selected_scenarios)]
+
+        if df_filtered.empty:
+            st.warning("Selecciona al menos un escenario para visualizar.")
+        else:
+            line = alt.Chart(df_filtered).mark_line(point=True, strokeWidth=2.5).encode(
+                x=alt.X("Semana:O", title="Semana", axis=alt.Axis(labelAngle=-45, labelFontSize=13)),
+                y=alt.Y("Costo Unitario ($/Und):Q", title="Costo Unitario ($/Und)",
+                        axis=alt.Axis(format="$,.0f", labelFontSize=13, titleFontSize=14)),
+                color=alt.Color("Escenario:N", legend=alt.Legend(title="Escenario", labelFontSize=13)),
+                tooltip=[
+                    alt.Tooltip("Escenario:N", title="Escenario"),
+                    alt.Tooltip("Semana:O", title="Semana"),
+                    alt.Tooltip("Costo Unitario ($/Und):Q", title="Costo Unitario", format="$,.0f")
+                ]
+            ).properties(height=400).interactive()
+
+            st.altair_chart(line, use_container_width=True)
         
     with tab_esc:
         if st.session_state['dict_summaries']:
