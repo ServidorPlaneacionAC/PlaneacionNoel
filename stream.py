@@ -349,9 +349,8 @@ if uploaded_file is not None:
         os.environ["GRB_WLSSECRET"] = st.secrets["GRB_WLSSECRET"]
         os.environ["GRB_LICENSEID"] = st.secrets["GRB_LICENSEID"]
         # --------------------------------------------------
-
-        # 4. SOLVER GUROBI (No Convexo)
-        solver = pyo.SolverFactory('gurobi') 
+        
+        solver = pyo.SolverFactory('gurobi_direct') 
         solver.options['TimeLimit'] = 180
         solver.options['NonConvex'] = 2 # Permite multiplicación bilineal
         
@@ -629,40 +628,47 @@ if st.session_state.get('opt_ejecutada', False):
         # Build a long-format dataframe from all scenario summaries
         linechart_rows = []
         for escenario, df_esc in st.session_state['dict_summaries'].items():
-            for _, row in df_esc.iterrows():
-                linechart_rows.append({
-                    "Escenario": escenario,
-                    "Semana": str(int(row["semana"])),
-                    "Costo Unitario ($/Und)": row["Costo fijo unitario ($/Und)"]
-                })
-        df_line = pd.DataFrame(linechart_rows)
+            if "semana" in df_esc.columns and "Costo fijo unitario ($/Und)" in df_esc.columns:
+                for _, row in df_esc.iterrows():
+                    linechart_rows.append({
+                        "Escenario": escenario,
+                        "Semana": str(int(row["semana"])),
+                        "Costo Unitario ($/Und)": row["Costo fijo unitario ($/Und)"]
+                    })
+                    
+        # BLINDAJE APLICADO: Obligamos a crear las columnas aunque no haya datos
+        df_line = pd.DataFrame(linechart_rows, columns=["Escenario", "Semana", "Costo Unitario ($/Und)"])
 
-        # Filter widget
-        all_scenarios = df_line["Escenario"].unique().tolist()
-        selected_scenarios = st.multiselect(
-            "Filtrar escenarios:",
-            options=all_scenarios,
-            default=all_scenarios
-        )
-
-        df_filtered = df_line[df_line["Escenario"].isin(selected_scenarios)]
-
-        if df_filtered.empty:
-            st.warning("Selecciona al menos un escenario para visualizar.")
+        # Si está vacío, mostramos advertencia en vez de explotar
+        if df_line.empty:
+            st.warning("⚠️ No hay datos válidos para graficar. Revisa si los escenarios fallaron o la licencia WLS no cargó.")
         else:
-            line = alt.Chart(df_filtered).mark_line(point=True, strokeWidth=2.5).encode(
-                x=alt.X("Semana:O", title="Semana", axis=alt.Axis(labelAngle=-45, labelFontSize=13)),
-                y=alt.Y("Costo Unitario ($/Und):Q", title="Costo Unitario ($/Und)",
-                        axis=alt.Axis(format="$,.0f", labelFontSize=13, titleFontSize=14)),
-                color=alt.Color("Escenario:N", legend=alt.Legend(title="Escenario", labelFontSize=13)),
-                tooltip=[
-                    alt.Tooltip("Escenario:N", title="Escenario"),
-                    alt.Tooltip("Semana:O", title="Semana"),
-                    alt.Tooltip("Costo Unitario ($/Und):Q", title="Costo Unitario", format="$,.0f")
-                ]
-            ).properties(height=400).interactive()
+            # Filter widget
+            all_scenarios = df_line["Escenario"].unique().tolist()
+            selected_scenarios = st.multiselect(
+                "Filtrar escenarios:",
+                options=all_scenarios,
+                default=all_scenarios
+            )
 
-            st.altair_chart(line, use_container_width=True)
+            df_filtered = df_line[df_line["Escenario"].isin(selected_scenarios)]
+
+            if df_filtered.empty:
+                st.warning("Selecciona al menos un escenario para visualizar.")
+            else:
+                line = alt.Chart(df_filtered).mark_line(point=True, strokeWidth=2.5).encode(
+                    x=alt.X("Semana:O", title="Semana", axis=alt.Axis(labelAngle=-45, labelFontSize=13)),
+                    y=alt.Y("Costo Unitario ($/Und):Q", title="Costo Unitario ($/Und)",
+                            axis=alt.Axis(format="$,.0f", labelFontSize=13, titleFontSize=14)),
+                    color=alt.Color("Escenario:N", legend=alt.Legend(title="Escenario", labelFontSize=13)),
+                    tooltip=[
+                        alt.Tooltip("Escenario:N", title="Escenario"),
+                        alt.Tooltip("Semana:O", title="Semana"),
+                        alt.Tooltip("Costo Unitario ($/Und):Q", title="Costo Unitario", format="$,.0f")
+                    ]
+                ).properties(height=400).interactive()
+
+                st.altair_chart(line, use_container_width=True)
         
     with tab_esc:
         if st.session_state['dict_summaries']:
