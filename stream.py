@@ -5,6 +5,7 @@ import pyomo.environ as pyo
 import io
 import altair as alt
 import math
+import os
 
 # Initial Streamlit page configuration (browser tab title and wide layout)
 st.set_page_config(page_title="Optimización de producción", layout="wide")
@@ -343,6 +344,11 @@ if uploaded_file is not None:
             else:
                 return pyo.Constraint.Skip
         model.StrictShifts = pyo.Constraint(model.T, rule=strict_shifts_rule)
+
+        os.environ["GRB_WLSACCESSID"] = st.secrets["GRB_WLSACCESSID"]
+        os.environ["GRB_WLSSECRET"] = st.secrets["GRB_WLSSECRET"]
+        os.environ["GRB_LICENSEID"] = st.secrets["GRB_LICENSEID"]
+        # --------------------------------------------------
 
         # 4. SOLVER GUROBI (No Convexo)
         solver = pyo.SolverFactory('gurobi') 
