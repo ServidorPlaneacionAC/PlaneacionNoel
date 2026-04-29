@@ -7,13 +7,6 @@ import altair as alt
 import math
 import os
 
-try:
-    os.environ["GRB_WLSACCESSID"] = st.secrets["GRB_WLSACCESSID"]
-    os.environ["GRB_WLSSECRET"] = st.secrets["GRB_WLSSECRET"]
-    os.environ["GRB_LICENSEID"] = str(st.secrets["GRB_LICENSEID"])
-except KeyError:
-    pass
-
 # Initial Streamlit page configuration (browser tab title and wide layout)
 st.set_page_config(page_title="Optimización de producción", layout="wide")
 st.title("🏭 Simulador programación de plantas")
@@ -278,8 +271,8 @@ if uploaded_file is not None:
 
         # 2. VARIABLES MIXTAS
         # X e I continuos (Reales) para fluidez. Turnos y Estibas (Enteros)
-        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals, bounds=(0, 5000000), initialize=100) 
-        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals, bounds=(0, 5000000), initialize=100) 
+        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers, bounds=(0, 5000000), initialize=100) 
+        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers, bounds=(0, 5000000), initialize=100) 
         
         model.Y = pyo.Var(model.T, domain=pyo.NonNegativeIntegers, bounds=(0, 100), initialize=10)          
         model.P = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers, bounds=(0, 100000), initialize=0) 
@@ -352,12 +345,13 @@ if uploaded_file is not None:
                 return pyo.Constraint.Skip
         model.StrictShifts = pyo.Constraint(model.T, rule=strict_shifts_rule)
         
-        solver = pyo.SolverFactory('gurobi_direct') 
-        solver.options['TimeLimit'] = 180
-        solver.options['NonConvex'] = 2 # Permite multiplicación bilineal
+        # 4. SOLVER SCIP (MINLP Open Source)
+        solver = pyo.SolverFactory('scip') 
         
         try:
+            # Ponemos tee=True para ver en el log cómo SCIP ataca el problema
             results = solver.solve(model, load_solutions=False, tee=True)
+            
             is_optimal = results.solver.termination_condition == pyo.TerminationCondition.optimal
             is_timeout = results.solver.termination_condition == pyo.TerminationCondition.maxTimeLimit
             
@@ -371,7 +365,7 @@ if uploaded_file is not None:
                 
         except Exception as e:
             error_msg = str(e)
-            error_df = pd.DataFrame([{"Error": f"Fallo en Gurobi: {error_msg}"}])
+            error_df = pd.DataFrame([{"Error": f"Fallo en SCIP: {error_msg}"}])
             return error_df, error_df, 0, False, False
         
         # 5. CONSTRUCCIÓN DEL REPORTE
