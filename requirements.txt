@@ -1,5 +1,7 @@
 streamlit
 pandas
 pyomo
+pyscipopt
 altair
 xlsxwriter
+openpyxl
