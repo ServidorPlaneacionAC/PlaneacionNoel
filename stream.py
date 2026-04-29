@@ -390,6 +390,9 @@ if uploaded_file is not None:
             error_msg = str(e)
             error_df = pd.DataFrame([{"Error": f"Fallo en SCIP: {error_msg}"}])
             return error_df, error_df, 0, False, False
+
+        import pyscipopt, os
+        st.code(os.listdir(os.path.dirname(pyscipopt.__file__)))
         
         # 5. CONSTRUCCIÓN DEL REPORTE
         prev_inv_value = sum(Val_I0[m] for m in M_set) 
