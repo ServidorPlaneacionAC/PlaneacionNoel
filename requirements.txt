@@ -3,5 +3,3 @@ pandas
 pyomo
 altair
 xlsxwriter
-gurobipy
-openpyxl
