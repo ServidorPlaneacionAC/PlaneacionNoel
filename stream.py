@@ -5,7 +5,7 @@ import pyomo.environ as pyo
 import io
 import altair as alt
 import math
-import os
+import shutil, os
 
 # Initial Streamlit page configuration (browser tab title and wide layout)
 st.set_page_config(page_title="Optimización de producción", layout="wide")
@@ -346,7 +346,30 @@ if uploaded_file is not None:
         model.StrictShifts = pyo.Constraint(model.T, rule=strict_shifts_rule)
         
         # 4. SOLVER SCIP (MINLP Open Source)
-        solver = pyo.SolverFactory('scip') 
+        def _find_scip_exe():
+            # 1. Check if it's already on PATH
+            p = shutil.which('scip')
+            if p:
+                return p
+            # 2. Look inside pyscipopt's installation directory
+            try:
+                import pyscipopt
+                base = os.path.dirname(pyscipopt.__file__)
+                candidates = [
+                    os.path.join(base, 'scip'),
+                    os.path.join(base, '..', 'bin', 'scip'),
+                    os.path.join(base, '..', '..', 'bin', 'scip'),
+                ]
+                for c in candidates:
+                    c = os.path.normpath(c)
+                    if os.path.isfile(c):
+                        return c
+            except ImportError:
+                pass
+            return None
+        
+        scip_exe = _find_scip_exe()
+        solver = pyo.SolverFactory('scip', executable=scip_exe) if scip_exe else pyo.SolverFactory('scip')
         
         try:
             # Ponemos tee=True para ver en el log cómo SCIP ataca el problema
