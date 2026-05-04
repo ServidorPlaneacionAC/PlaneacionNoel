@@ -354,7 +354,7 @@ if uploaded_file is not None:
                 return pyo.Constraint.Skip
         model.StrictShifts = pyo.Constraint(model.T, rule=strict_shifts_rule)
         
-        solver = pyo.SolverFactory('gurobi_direct') 
+        solver = pyo.SolverFactory('gurobi_direct_v2') 
         solver.options['TimeLimit'] = 180
         solver.options['NonConvex'] = 2 # Permite multiplicación bilineal
         
