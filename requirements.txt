@@ -1,7 +1,7 @@
 streamlit
 pandas
-pyomo.environ
-io
+pyomo
 altair
-math
+xlsxwriter
 gurobipy
+openpyxl
