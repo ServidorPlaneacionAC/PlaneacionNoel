@@ -5,3 +5,4 @@ altair
 xlsxwriter
 gurobipy
 openpyxl
+scipy
