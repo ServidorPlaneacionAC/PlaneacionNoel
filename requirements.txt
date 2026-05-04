@@ -1,7 +1,8 @@
-streamlit
+streamlit as st
 pandas
-pyomo
-pyscipopt
+pyomo.environ
+io
 altair
-xlsxwriter
-openpyxl
+math
+os
+gurobipy
