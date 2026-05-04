@@ -1,8 +1,7 @@
-streamlit as st
+streamlit
 pandas
 pyomo.environ
 io
 altair
 math
-os
 gurobipy
