@@ -5,7 +5,14 @@ import pyomo.environ as pyo
 import io
 import altair as alt
 import math
-import shutil, os
+import os
+
+try:
+    os.environ["GRB_WLSACCESSID"] = st.secrets["GRB_WLSACCESSID"]
+    os.environ["GRB_WLSSECRET"] = st.secrets["GRB_WLSSECRET"]
+    os.environ["GRB_LICENSEID"] = str(st.secrets["GRB_LICENSEID"])
+except KeyError:
+    pass
 
 # Initial Streamlit page configuration (browser tab title and wide layout)
 st.set_page_config(page_title="Optimización de producción", layout="wide")
@@ -271,8 +278,8 @@ if uploaded_file is not None:
 
         # 2. VARIABLES MIXTAS
         # X e I continuos (Reales) para fluidez. Turnos y Estibas (Enteros)
-        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers, bounds=(0, 5000000), initialize=100) 
-        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers, bounds=(0, 5000000), initialize=100) 
+        model.X = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals, bounds=(0, 5000000), initialize=100) 
+        model.I = pyo.Var(model.M, model.T, domain=pyo.NonNegativeReals, bounds=(0, 5000000), initialize=100) 
         
         model.Y = pyo.Var(model.T, domain=pyo.NonNegativeIntegers, bounds=(0, 100), initialize=10)          
         model.P = pyo.Var(model.M, model.T, domain=pyo.NonNegativeIntegers, bounds=(0, 100000), initialize=0) 
@@ -345,36 +352,12 @@ if uploaded_file is not None:
                 return pyo.Constraint.Skip
         model.StrictShifts = pyo.Constraint(model.T, rule=strict_shifts_rule)
         
-        # 4. SOLVER SCIP (MINLP Open Source)
-        def _find_scip_exe():
-            # 1. Check if it's already on PATH
-            p = shutil.which('scip')
-            if p:
-                return p
-            # 2. Look inside pyscipopt's installation directory
-            try:
-                import pyscipopt
-                base = os.path.dirname(pyscipopt.__file__)
-                candidates = [
-                    os.path.join(base, 'scip'),
-                    os.path.join(base, '..', 'bin', 'scip'),
-                    os.path.join(base, '..', '..', 'bin', 'scip'),
-                ]
-                for c in candidates:
-                    c = os.path.normpath(c)
-                    if os.path.isfile(c):
-                        return c
-            except ImportError:
-                pass
-            return None
-        
-        scip_exe = _find_scip_exe()
-        solver = pyo.SolverFactory('scip', executable=scip_exe) if scip_exe else pyo.SolverFactory('scip')
+        solver = pyo.SolverFactory('gurobi_direct') 
+        solver.options['TimeLimit'] = 180
+        solver.options['NonConvex'] = 2 # Permite multiplicación bilineal
         
         try:
-            # Ponemos tee=True para ver en el log cómo SCIP ataca el problema
             results = solver.solve(model, load_solutions=False, tee=True)
-            
             is_optimal = results.solver.termination_condition == pyo.TerminationCondition.optimal
             is_timeout = results.solver.termination_condition == pyo.TerminationCondition.maxTimeLimit
             
@@ -388,11 +371,8 @@ if uploaded_file is not None:
                 
         except Exception as e:
             error_msg = str(e)
-            error_df = pd.DataFrame([{"Error": f"Fallo en SCIP: {error_msg}"}])
+            error_df = pd.DataFrame([{"Error": f"Fallo en Gurobi: {error_msg}"}])
             return error_df, error_df, 0, False, False
-
-        import pyscipopt, os
-        st.code(os.listdir(os.path.dirname(pyscipopt.__file__)))
         
         # 5. CONSTRUCCIÓN DEL REPORTE
         prev_inv_value = sum(Val_I0[m] for m in M_set) 
