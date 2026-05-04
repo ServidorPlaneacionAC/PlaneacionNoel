@@ -6,6 +6,8 @@ import io
 import altair as alt
 import math
 import os
+import gurobipy as gp
+from gurobipy import GRB
 
 try:
     os.environ["GRB_WLSACCESSID"] = st.secrets["GRB_WLSACCESSID"]
